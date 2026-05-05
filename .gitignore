@@ -1,4 +1,6 @@
 # <!-- Using .gitignore Python template-->
+data/processed/95_dereplicated_vPOP.fa
+data/processed/iphop_host_pred_dereplicated_vPOP.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
