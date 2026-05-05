@@ -1,0 +1,1669 @@
+---
+title: "Zimbabwe_vPOPs"
+format: html
+editor: visual
+---
+
+# Viral populations analysis
+
+## Libraries and dependencies
+
+```{r}
+#| message: false
+#| warning: true
+library(ggplot2)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(ggbreak)
+library(ggforce)
+library(reshape)
+library(ggExtra)
+library(phyloseq)
+library(vegan)
+library(ggpubr)
+library(gplots)
+library(viridis) 
+library(ggpmisc)
+library(mgcv)
+library(cluster)
+library(VennDiagram)
+library(rstatix)
+library(lme4)
+library(lmerTest)
+library(MuMIn)
+library(multcomp)
+library(caret)
+library(tictoc)
+library(randomForest)
+library(purrr)
+library(pROC)
+library(tidyverse)
+library(scales)
+library(plotly)
+library(UpSetR)
+library(ggplotify)
+library(Cairo)
+library(gridExtra)
+library(phyloseq)
+library(emmeans)
+library(cowplot)
+library(reshape2)
+library(pheatmap)
+library(Boruta)
+library(ggmosaic)
+source("models/functions_aim2.R")
+```
+
+## Color Palettes
+
+```{r}
+colorblind_palette = c("#0072B2","#56B4E9","#A285D1","#E69F00","#D55E00")
+
+colorMAL_palette = c("#0072B2","#E69F00","#D55E00")
+
+palette_qc=c("#009e73","#56b4e6","#cd9600","#c77cff","#ff61cc")
+
+replication_palette=c("#6A5ACD","#228B22","gray30","gray60")
+
+cbPalette_hosts <- c("#0072B2", "#E69F00", "#882255", "#009E73", "#F0E442",
+  "#D55E00", "#CC79A7", "gray50","#56B4E9","#999999", "#44AA99", "#88CCEE")
+
+prevalence_palette=c("#009e73","#56b4e6","#cd9600")
+
+persistence_palette <- c("#D55E00", "#CC79A7", "#0072B2")
+
+organism_palette <- c("#F05039","#1F449C")
+```
+
+## Experimental Design: Sample schedule and anthropometric measures, stratified by nutritional statuses and sex
+
+```{r}
+#Metadata
+metadata_samples=read.csv("data/raw/metadata_Zimbabwe.csv",h=T)
+metadata_samples = metadata_samples[!duplicated(metadata_samples$sample),]
+metaphlan <- readRDS("data/raw/metaphlan.rds")
+whz_muac_data=metaphlan[,c(3,273,161)]
+whz_muac_data_dedup=whz_muac_data[!duplicated(whz_muac_data$Sample),]
+metadata_samples = metadata_samples %>% left_join(whz_muac_data_dedup,by=c("sample"="Sample"),keep = F)
+
+#Undernutrition
+metadata_samples$MUW=ifelse(metadata_samples$waz< -2 & metadata_samples$waz>= -3,1,0)
+metadata_samples$SUW=ifelse(metadata_samples$waz< -3,1,0)
+
+
+#Acute malnutrition
+metadata_samples$MAM=ifelse(metadata_samples$whz<= -2 & metadata_samples$whz>= -3,1,0)
+metadata_samples$SAM=ifelse(metadata_samples$whz< -3,1,0)
+
+#Chronic malnutrition
+metadata_samples$MCM=ifelse(metadata_samples$laz<= -2 & metadata_samples$laz>= -3,1,0)
+metadata_samples$SCM=ifelse(metadata_samples$laz< -3,1,0)
+
+#Healthy development
+metadata_samples$Healthy=ifelse(rowSums(metadata_samples[,10:15])== 0,1,0)
+
+#Visualization dataset
+upset_1=upset(metadata_samples,nsets=7,sets=c("MUW","SUW","MAM","SAM","MCM","SCM","Healthy"),order.by="freq",keep.order = T)
+
+CairoSVG("assets/Malnutrition_all_categories",width=5)
+upset_1
+dev.off()
+
+#Infant level (everything before is counts of samples)
+metadata_samples$MAL_group=ifelse(metadata_samples$Healthy==1,"Normal growth",
+                                  ifelse(metadata_samples$MCM == 1 & metadata_samples$MAM == 0,"Moderate stunting",
+                                         ifelse(metadata_samples$SCM == 1,"Severe stunting",
+                                                ifelse(metadata_samples$SAM==1,"SAM",
+                                                        ifelse(metadata_samples$MAM==1,"MAM",
+                                                              ifelse(metadata_samples$MUW & rowSums(metadata_samples[,10:15])==1,"Healthy_UW","Not_determined"))))))
+
+
+
+#ggplot(metadata_samples,aes(x=age,y=subjectID.x,color=MAL_group,group=subjectID.x))+geom_point()+geom_line(color="gray")+ theme_minimal()+scale_color_manual(values = colorblind_palette)
+
+print(paste("Number of infants = ",length(unique(metadata_samples$subjectID.x))))
+
+
+#Remove acute malnutrition and healthy underweight or unidentified.
+metadata_samples= metadata_samples[!metadata_samples$MAL_group %in% c("MAM","SAM","Healthy_UW","NA"),]
+metadata_samples=metadata_samples[!is.na(metadata_samples$MAL_group),]
+metadata_samples=droplevels(metadata_samples)
+
+# Apply the function to each row and create a new dataframe which will have the nutritional status per infant
+result <- metadata_samples %>% group_by(subjectID.x) %>%  arrange(age) %>%
+  summarize(stunted_status = map_chr(list((MAL_group)),classify_transitions))
+
+all_children=metadata_samples %>% left_join(result,by="subjectID.x",keep = F) %>% drop_na(stunted_status) 
+
+print(paste("Number of infants = ",length(unique(all_children$subjectID.x))))
+print(paste("Number of samples = ",length(unique(all_children$sample))))
+
+all_children$MAL_group=factor(all_children$MAL_group,levels=c("Normal growth","Moderate stunting","Severe stunting"))
+
+# Adding numbers of observations
+label_counts <- all_children %>% add_count(MAL_group) %>% group_by(stunted_status) %>% mutate(nn=n_distinct(subjectID.x)) %>% 
+  mutate(MAL_group_labeled = paste0(MAL_group, " (n=", n, ")"), 
+         stunted_status_labeled = paste0(stunted_status, " (n=", nn, ")"))
+
+label_counts$MAL_group_labeled <- factor(
+  label_counts$MAL_group_labeled,
+  levels = unlist(lapply(c("Normal", "Moderate", "Severe"), function(pat) {
+    unique(label_counts$MAL_group_labeled[grep(pat, label_counts$MAL_group_labeled)])
+  })))
+
+
+all_children = all_children[!all_children$stunted_status %in% unique(label_counts$stunted_status[label_counts$nn<=5]),]
+all_children = droplevels(all_children)
+
+all_children$trajectory = ifelse(all_children$stunted_status=="Normal growth","Consistent normal growth",ifelse(all_children$stunted_status=="Moderate stunting","Consistent moderate stunting",ifelse(all_children$stunted_status=="Severe stunting","Consistent severe stunting",ifelse(all_children$stunted_status=="Normal growth , Moderate stunting","Decline to moderate stunting","Recovery to normal growth"))))
+
+all_children$trajectory = factor(all_children$trajectory,levels=c("Consistent normal growth","Recovery to normal growth","Decline to moderate stunting","Consistent moderate stunting","Consistent severe stunting"))
+
+print(paste("Number of infants = ",length(unique(all_children$subjectID.x))))
+print(paste("Number of samples = ",length(unique(all_children$sample))))
+
+
+# Adding numbers of observations
+label_counts <- all_children %>% add_count(MAL_group) %>% group_by(trajectory) %>% mutate(nn=n_distinct(subjectID.x)) %>% 
+  mutate(MAL_group_labeled = paste0(MAL_group, " (n=", n, ")"), 
+         stunted_status_labeled = paste0(trajectory, " (n=", nn, ")"))
+
+label_counts$MAL_group_labeled <- factor(
+  label_counts$MAL_group_labeled,
+  levels = unlist(lapply(c("Normal", "Moderate", "Severe"), function(pat) {
+    unique(label_counts$MAL_group_labeled[grep(pat, label_counts$MAL_group_labeled)])
+  })))
+
+label_counts$stunted_status_labeled <- factor(
+  label_counts$stunted_status_labeled,
+  levels = unlist(lapply(c("Consistent normal growth","Recovery to normal growth","Decline to moderate stunting","Consistent moderate stunting","Consistent severe stunting"), function(pat) {
+    unique(label_counts$stunted_status_labeled[grep(pat, label_counts$stunted_status_labeled)])
+  })))
+
+plot_selected_statuses=ggplot(label_counts,aes(x=age,y=subjectID.x,color=MAL_group_labeled,group=subjectID.x))+geom_point(size=1)+geom_line(color="gray",size=0.5)+theme_classic( base_size = 25)+scale_color_manual(values = colorblind_palette[-c(2:3)],name="")+facet_wrap(~stunted_status_labeled,nrow=1,labeller = label_wrap_gen(width = 20))+theme(axis.text.y = element_blank(),legend.position = "bottom")+ylab("Infant")+xlab("Infant chronological age (days)")
+
+#ggsave(plot_selected_statuses,filename = "assets/SupplementaryFig1B.png",device = "png",width=450,height =250,unit="mm")
+
+#Analyses of reads mapped: alignment rate: percentage of reads from each sample that aligned to the vPOPs (Zimbabwe + GVD).  
+read_mapp_dist=read.table("data/processed/aln_stats_reads_to_vOTUs.txt",sep=",",h=F)
+names(read_mapp_dist)=c("accession","proportion_reads_mapped","total_reads")
+all_children= all_children %>% left_join(read_mapp_dist,by="accession") 
+all_children$vOTU_reads=(all_children$proportion_reads_mapped*all_children$total_reads)/100
+all_children$type=ifelse(grepl(",",all_children$trajectory),"transitioning","consistent")  
+
+plot_vOTUreads_time=all_children %>% ggplot(aes(y=vOTU_reads,x=age,color=trajectory))+
+  facet_wrap(~type)+geom_point()+geom_smooth(method="lm")+ scale_color_manual(values = colorblind_palette)+theme_bw()
+#ggsave(plot_vOTUreads_time,filename = "assets/vOTUreads_time.png",device = "png",width=200,height =100,unit="mm")
+
+
+##### Sex Partition #####
+
+sex2infant=metaphlan[,c(3,244)]
+sex2infant=sex2infant[!duplicated(sex2infant$Sample),]
+
+all_children = all_children %>% left_join(sex2infant, by = c("sample"="Sample"),keep = F)
+
+# Adding numbers of observations
+label_counts <- all_children %>% group_by(sex) %>% add_count(MAL_group) %>% 
+  mutate(MAL_group_labeled_bysex = paste0(MAL_group, " (n=", n, ")"))
+
+label_counts$MAL_group_labeled_bysex <- factor(
+  label_counts$MAL_group_labeled_bysex,
+  levels = unlist(lapply(c("Normal", "Moderate", "Severe"), function(pat) {
+    unique(label_counts$MAL_group_labeled_bysex[grep(pat, label_counts$MAL_group_labeled_bysex)])
+  })))
+
+significant_comparisons <- function(values,group.vector,adjust.method,paired){
+  if(missing(paired)){paired=F}
+  #Filter out groups with n<2
+  groups_n_greater_1 = names(table(group.vector)[table(group.vector)>1])
+  values=values[group.vector %in% groups_n_greater_1]
+  group.vector=group.vector[group.vector %in% groups_n_greater_1]
+  
+  #Group stats
+  test=pairwise.wilcox.test(values, group.vector,p.adjust.method = adjust.method, paired = paired)
+  #Generate list with significant comparisons
+  p.list=list()
+  for(i in 1:nrow(test$p.value)){
+    for(k in 1:ncol(test$p.value)){
+      if(is.na(test$p.value[i,k])==F){
+        if(test$p.value[i,k]<=0.05){p.list=c(p.list,list(c(rownames(test$p.value)[i],colnames(test$p.value)[k])))}
+      }
+    }
+  }
+  return(p.list)
+}
+
+label_counts <- label_counts %>% ungroup() %>% add_count(MAL_group) %>% 
+  mutate(MAL_group_labeled = paste0(MAL_group, " (n=", nn, ")")) %>% 
+  add_count(sex,name = "sex_count") %>% mutate(sex_labeled = paste0(sex, " (n=", sex_count, ")"))
+
+label_counts$MAL_group_labeled <- factor(
+  label_counts$MAL_group_labeled,
+  levels = unlist(lapply(c("Normal", "Moderate", "Severe"), function(pat) {
+    unique(label_counts$MAL_group_labeled[grep(pat, label_counts$MAL_group_labeled)])
+  })))
+
+
+whz_plot=ggplot(label_counts,aes(y=whz,x=MAL_group,color=MAL_group))+
+  geom_point()+geom_boxplot()+
+  geom_hline(yintercept = -2,linetype = 3)+geom_hline(yintercept = -3,linetype = 3)+
+  scale_color_manual(values = colorMAL_palette,guide="none")+
+  theme_classic(base_size = 30)+xlab("")+
+  annotate("rect",ymin=-3,ymax=-2,xmin = -Inf, xmax = Inf,fill=colorMAL_palette[2],alpha=0.2)+
+  annotate("rect",ymin=-Inf,ymax=-3,xmin = -Inf, xmax = Inf,fill=colorMAL_palette[3],alpha=0.2)+
+  facet_wrap(~sex_labeled,scales="free_x")+theme(axis.text.x = element_text(angle=90,vjust = 0.5,hjust = 1),axis.text.y = element_text(angle=90,hjust=0.5),strip.background = element_blank(),strip.text = element_blank())+  ylab("Weight-for-Height Z-score (WHZ)")+  stat_compare_means(comparisons =  significant_comparisons(label_counts$whz,label_counts$MAL_group,adjust.method="bonferroni",paired=F),na.rm = T, label = "p.signif", method = "wilcox.test",hide.ns = T)
+
+
+laz_plot=ggplot(label_counts,aes(y=laz,x=MAL_group,color=MAL_group_labeled))+
+  geom_point()+geom_boxplot()+
+  geom_hline(yintercept = -2,linetype = 3)+geom_hline(yintercept = -3,linetype = 3)+
+  scale_color_manual(values = colorMAL_palette,name="")+
+  theme_classic(base_size = 30)+xlab("")+
+  annotate("rect",ymin=-3,ymax=-2,xmin = -Inf, xmax = Inf,fill=colorMAL_palette[2],alpha=0.2)+
+  annotate("rect",ymin=-Inf,ymax=-3,xmin = -Inf, xmax = Inf,fill=colorMAL_palette[3],alpha=0.2)+
+  facet_wrap(~sex_labeled,scales="free_x")+theme(axis.text.x = element_blank(),axis.text.y = element_text(angle=90,hjust=0.5),legend.position = "none")+ ylab("Length-for-Age Z-score (LHZ)")+ stat_compare_means(comparisons = significant_comparisons(label_counts$laz,label_counts$MAL_group,adjust.method="bonferroni",paired=F),na.rm = T, label = "p.signif", method = "wilcox.test",hide.ns = F)
+
+library(patchwork)
+cohort_caracterization = laz_plot / whz_plot
+
+combined_plot = cohort_caracterization +  plot_layout(heights = c(1, 1)) & 
+    theme(plot.margin = ggplot2::margin(5, 5, 5, 5))
+
+#ggsave(filename = "assets/cohort_caracterization.png",plot = combined_plot,width = 300, height = 420, units = "mm")
+
+waz_plot=ggplot(label_counts,aes(y=waz,x=MAL_group_labeled_bysex,color=MAL_group_labeled))+ geom_point()+geom_boxplot()+ geom_hline(yintercept = -2,linetype = 3)+geom_hline(yintercept = -3,linetype = 3)+ scale_color_manual(values = colorMAL_palette,guide="none")+
+  theme_classic(base_size = 27)+xlab("")+
+  annotate("rect",ymin=-3,ymax=-2,xmin = -Inf, xmax = Inf,fill=colorMAL_palette[2],alpha=0.2)+
+  annotate("text", x = -Inf, y = -2.25, label = "Moderate", hjust = -0.1, vjust = 0.5, size = 3) +
+  annotate("rect",ymin=-Inf,ymax=-3,xmin = -Inf, xmax = Inf,fill=colorMAL_palette[3],alpha=0.2)+
+  annotate("text", x = -Inf, y = -3.25, label = "Severe", hjust = -0.1, vjust = 0.5, size = 3) +
+  facet_wrap(~sex,scales="free_x")+theme(axis.text.x = element_text(angle=90,vjust = 0.5,hjust = 1),axis.title.y = element_text())+ ylab("Weigth-for-age Z-score (waz)")+stat_compare_means(comparisons = significant_comparisons(label_counts$waz,label_counts$MAL_group,adjust.method="bonferroni",paired=F),na.rm = T, label = "p.signif", method = "wilcox.test",hide.ns = F)
+
+
+muac_plot = ggplot(label_counts,aes(y=muac,x=MAL_group,color=MAL_group_labeled))+
+  geom_point()+geom_boxplot()+
+  geom_hline(yintercept = 125,linetype = 3)+
+  geom_hline(yintercept = 115,linetype = 3)+
+  scale_color_manual(values = colorMAL_palette,name="")+
+  theme_classic(base_size = 30)+xlab("")+
+  annotate("rect",ymin=115,ymax=125,xmin = -Inf, xmax = Inf,fill=colorMAL_palette[2],alpha=0.2)+
+  annotate("rect",ymin=-Inf,ymax=115,xmin = -Inf, xmax = Inf,fill=colorMAL_palette[3],alpha=0.2)+
+  theme(axis.text.x = element_text(angle=90,vjust = 0.5,hjust = 1),axis.text.y = element_text(angle=90,hjust=0.5),legend.position = "none")+ ylab("Middle Upper Arm Circumference (mm)")+ stat_compare_means(comparisons = significant_comparisons(label_counts$muac,label_counts$MAL_group,adjust.method="bonferroni",paired=F),na.rm = T, label = "p.signif", method = "wilcox.test",hide.ns = T)+facet_wrap(~sex_labeled,scales="free_x")
+
+#ggsave("assets/muac.png", plot = muac_plot, width = 10, height = 11.5)
+#ggplot(label_counts,aes(y=whz,x=laz,color=is.na(muac)))+ geom_point()+theme_classic(base_size = 30)
+#ggplot(label_counts,aes(y=age,x=reorder(subjectID.x,muac),color=is.na(muac)))+ geom_point()+geom_line()+theme_classic(base_size = 30)
+
+```
+
+## Ecological Analyses
+
+### Bacterial Communities: Data Import from Metaphlan
+
+```{r}
+#Metaphlan result (cedar: /project/rrg-corinnem/lcamelo/Robertson_etal_2023/17.read_based_bacterial_analyses/)
+profile=read.table("data/processed/all_samples_metaphlan4_output.csv",sep=",",h=F)
+names(profile)=c("species","value","sample")
+profile = profile %>% group_by(sample,species) %>% summarise(rel.ab=sum(value)) 
+profile$species =factor(profile$species)
+profile$sample =factor(profile$sample)
+
+
+abundance_table = profile %>% pivot_wider(names_from = "species",values_from = "rel.ab",values_fill = 0)
+metadata = all_children[,-5]
+profile_metadata = abundance_table %>% left_join(metadata,by=c("sample"="accession"))
+profile_metadata = profile_metadata %>% drop_na(subjectID.x)
+
+#Bacteroides and E.coli relationship 
+profile %>% filter(grepl("Bacteroides",species) | grepl("Escherichia_coli",species)) %>% pivot_wider(names_from = "species",values_from = "rel.ab",values_fill = 0) %>% left_join(metadata,by=c("sample"="accession")) %>% ungroup() %>% mutate(Bacteroides_total = rowSums(select(., starts_with("s__Bacteroides")), na.rm = TRUE)) %>% ggplot(aes(x=s__Escherichia_coli,y=Bacteroides_total,color=laz))+geom_point()
+
+```
+
+### Viral Communities: Data Import, quality control, host and life cycle prediction, prevalence and persistence
+
+I dereplicated the viral genomes identified with genomad at 95% ANI along 85% of the sequences. These resulted in 22,937 viral OTUs, and reads from all samples were mapped to it.
+
+```{r}
+#Coverage file
+#PREFILTERED IN BASH (COVERAGE/BREADTH > 75 & MEANDEPTH > 1)
+vPOP_coverage=read.table("data/processed/phage_coverage_0_600_filtered.tsv",h=F)
+names(vPOP_coverage) = c("sample","contig","startpos","endpos","numreads","covbases","coverage","meandepth","meanbaseq","meanmapq")
+vPOP_coverage =vPOP_coverage[,c(1,2,7,8)]
+names(vPOP_coverage)=c("sample","contig","coverage","meandepth")
+
+vPOP_coverage = vPOP_coverage[vPOP_coverage$sample %in% all_children$accession,]
+length(unique(vPOP_coverage$sample))
+
+#checkV results
+qc_results=read.table("data/processed/vOTU_dereplicated_checkV.tsv",h=T,sep="\t")
+
+qc_results$checkv_quality=factor(qc_results$checkv_quality,levels=c("Complete","High-quality","Medium-quality","Low-quality","Not-determined"))
+qc_results$quality_dummy="Quality"
+
+accession_pattern <- paste(all_children$accession, collapse = "|")
+
+
+qc_results$origin=ifelse(grepl(accession_pattern,qc_results$contig_id),"Zimbabwe","GVD")
+qc_results$origin=factor(qc_results$origin)
+
+qc_results = qc_results[qc_results$contig_id %in% unique(vPOP_coverage$contig),]
+
+
+GVD_vs_Zimb_plot = ggplot(qc_results,aes(x=origin,fill=checkv_quality))+geom_bar()+scale_fill_manual(values=palette_qc)+theme_bw()+xlab("")+ylab("Number of vOTUs")
+#ggsave(GVD_vs_Zimb_plot,filename = "assets/GVD_vs_Zimb_plot.png",device = "png",width=100,height =80,unit="mm")
+
+
+# Adding numbers of observations
+label_counts <- qc_results %>% add_count(checkv_quality) %>% 
+  mutate(checkv_quality_labeled = paste0(checkv_quality, " (n=", n, ")"))
+
+label_counts$checkv_quality_labeled <- factor(
+  label_counts$checkv_quality_labeled,
+  levels = unlist(lapply(c("Complete", "High", "Medium","Low","Not-determined"), function(pat) {
+    unique(label_counts$checkv_quality_labeled[grep(pat, label_counts$checkv_quality_labeled)])
+  })))
+
+plot_quality=ggplot(label_counts,aes(x=quality_dummy,fill=checkv_quality_labeled))+geom_bar()+scale_fill_manual(values=palette_qc,name="Quality Category")+xlab("")+ylab("Number of vOTUs")+theme_classic()+theme(axis.text.x = element_blank(),axis.ticks.x = element_blank())
+#ggsave(plot_quality,filename = "assets/plot_quality.png",device = "png",width=100,height =80,unit="mm")
+
+
+quality_dist_plot = ggplot(label_counts,aes(x=completeness,y=contamination,color=checkv_quality_labeled))+geom_jitter(size=0.1,width = 1,height = 1)+theme_bw()+scale_color_manual(values=palette_qc,name="")+theme_classic(base_size = 10)+theme(axis.text.x = element_text(angle = 90,hjust = 1,vjust = 0.5),axis.title = element_text(size = 10),axis.text = element_text(size = 10),    strip.text = element_text(size = 10),legend.title = element_text(size = 10),legend.text = element_text(size = 10))
+
+#ggsave(quality_dist_plot,filename = "assets/quality_dist_plot.png",device = "png",width=100,height =70,unit="mm")
+
+# Life Cycle
+bacphlip=read.table("data/processed/BACPHLIP_pred_all_vOTUs.txt",sep="\t")
+names(bacphlip)=c("contig","virulent_prob","temporate_prob")
+bacphlip$replication_cycle=ifelse(bacphlip$virulent_prob>0.5,"Virulent",ifelse(bacphlip$temporate_prob>0.5,"Temperate","NoConfidence"))
+
+
+bacphlip = bacphlip %>% left_join(qc_results,by=c("contig"="contig_id"))
+
+bacphlip_filt=bacphlip[bacphlip$checkv_quality %in% c("Complete","High-quality","Medium-quality"),]
+bacphlip_filt$replication_cycle[(bacphlip_filt$checkv_quality %in% c("High-quality","Medium-quality") & bacphlip_filt$replication_cycle %in% c("Virulent"))] = "Non-temperate"
+bacphlip_filt = bacphlip_filt[-which(bacphlip_filt$replication_cycle =="NoConfidence"),]
+bacphlip_filt=droplevels(bacphlip_filt)
+
+bacphlip_filt = bacphlip_filt[bacphlip_filt$contig %in% unique(vPOP_coverage$contig),]
+
+
+label_counts <- bacphlip_filt %>% add_count(replication_cycle,checkv_quality) %>% 
+  mutate(replication_cycle_labeled = paste0(replication_cycle, " (n=", n, ")"))
+
+label_counts$replication_cycle <- factor(
+  label_counts$replication_cycle,
+  levels = unlist(lapply(c("Virulent", "Temperate", "Non-temperate"), function(pat) {
+    unique(label_counts$replication_cycle[grep(pat, label_counts$replication_cycle)])
+  }))) 
+
+label_counts$replication_cycle_labeled <- factor(
+  label_counts$replication_cycle_labeled,
+  levels = unlist(lapply(c("Virulent", "Temperate", "Non-temperate"), function(pat) {
+    unique(label_counts$replication_cycle_labeled[grep(pat, label_counts$replication_cycle_labeled)])
+  })))
+
+
+life_cycle_qc_plot=ggplot(label_counts,aes(x=replication_cycle_labeled,y=contig_length,color=replication_cycle))+geom_boxplot(size = 1) +geom_jitter(alpha=0.2,size=0.4,position = position_jitterdodge(jitter.width = 0.5))+scale_y_log10()+scale_color_manual(values=replication_palette,name="")+ylab("Contig length (bp)")+xlab("")+ facet_wrap(~checkv_quality,scales = "free_x")+theme_classic(base_size = 20)+theme(axis.text.x = element_text(angle = 30,hjust = 1,vjust = 1),axis.title.y = element_text(margin = ggplot2::margin(r=30)),strip.text = element_text(face = "bold"), legend.position = "top",legend.key.width = unit(4,"cm"),legend.spacing.x = unit(3,"cm"))+guides(color = guide_legend(nrow = 1, label.position = "top",byrow = TRUE))
+
+
+#ggsave(life_cycle_qc_plot,filename = "assets/lifeCycle_length.png",device = "png",width=150,height = 200,unit="mm",dpi=300)
+
+#Host Information 
+host_assignment = read.table("data/processed/iphop_host_pred_dereplicated_vPOP.txt",sep=",",h=T)
+
+length(unique(host_assignment$Virus)) #59132 out of 73471 vPOPs have a predicted host (80%)
+
+host_pred_dedup <- host_assignment %>% group_by(Virus) %>% arrange(desc(Confidence.score)) %>% slice(1) # pick most confident hit
+host_pred_dedup <- host_pred_dedup[,c(1,2,3,5)]
+
+host_pred_split <- host_pred_dedup %>% 
+  separate(col = Host.taxonomy, into = c("domain", "phylum", "class", "order", "family", "genus", "species"), sep = ";")
+
+host_pred_split$domain <- gsub("d__", "", host_pred_split$domain)
+host_pred_split$phylum <- gsub("p__", "", host_pred_split$phylum)
+host_pred_split$class <- gsub("c__", "", host_pred_split$class)
+host_pred_split$order <- gsub("o__", "", host_pred_split$order)
+host_pred_split$family <- gsub("f__", "", host_pred_split$family)
+host_pred_split$genus <- gsub("g__", "", host_pred_split$genus)
+host_pred_split$species <- gsub("s__", "", host_pred_split$species)
+
+length(intersect(host_pred_split$Virus,unique(vPOP_coverage$contig)))/length(unique(vPOP_coverage$contig))
+#91% assigned host at the moment
+
+vPOP_coverage_lifeStyle = vPOP_coverage %>% left_join(bacphlip_filt[,c(1,4)],by="contig") 
+vPOP_coverage_lifeStyle$replication_cycle[is.na(vPOP_coverage_lifeStyle$replication_cycle)]="Unassigned replication cycle"
+
+vPOP_coverage_lifeStyle = vPOP_coverage_lifeStyle %>% left_join(host_pred_split[,c(1,7)], by = c("contig"="Virus"))
+
+#NEEDS HOST INFORMATION
+db_vOTUs_infats= vPOP_coverage_lifeStyle %>% dplyr::select(contig,replication_cycle,family) %>% distinct()  
+db_vOTUs_infats$assignment=ifelse(is.na(db_vOTUs_infats$family) | db_vOTUs_infats$family =="" ,"Unassigned","Assigned")
+
+db_vOTUs_infats$family[db_vOTUs_infats$family ==""] = NA
+
+label_counts <- db_vOTUs_infats %>% add_count(replication_cycle) %>% add_count(assignment) %>%
+  mutate(replication_cycle_labeled = paste0(replication_cycle, " (n=", n, ")"),
+         assignment_labeled = paste0(assignment, " (n=", nn, ")"))
+
+label_counts_host_plot = label_counts %>% count(family) %>% arrange(desc(n)) %>% mutate(percentage=n/sum(n)) %>% mutate(cum_percentage=cumsum(percentage)) %>% mutate(host=ifelse(cum_percentage<=0.75,family,"Other (n = 111)")) %>% select(family,host) %>% distinct()
+#family=family,cum_percentage=cum_percentage,
+label_counts_df = label_counts %>% select(family,replication_cycle_labeled) %>% left_join(label_counts_host_plot,by="family")
+
+label_counts_host_plot$host = factor(label_counts_host_plot$host, levels = c("Bacteroidaceae","Lachnospiraceae","Ruminococcaceae","Enterobacteriaceae","Veillonellaceae","Bifidobacteriaceae","Oscillospiraceae","Other (n = 111)"))
+
+label_counts$replication_cycle_labeled <- factor(
+  label_counts$replication_cycle_labeled,
+  levels = unlist(lapply(c("Virulent", "Temperate", "Non-temperate","Unassigned replication cycle"), function(pat) {
+    unique(label_counts$replication_cycle_labeled[grep(pat, label_counts$replication_cycle_labeled)])
+  })))
+
+hosts_assigned_plot = label_counts %>% select(family,replication_cycle_labeled,assignment_labeled) %>% left_join(label_counts_host_plot,by="family") %>% ggplot() + geom_bar(aes(x=replication_cycle_labeled,fill=host),position = "fill", width = 0.8,alpha=0.7) +  theme_classic(base_size = 20) + theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1),axis.line = element_blank(),axis.text = element_text(margin = ggplot2::margin(l=0,r=5,unit="pt")),axis.ticks.length.x = unit(0, "cm"),axis.ticks.length.y = unit(0.2, "cm")) +scale_fill_manual(values = cbPalette_hosts,name="Host family")+xlab("")+ylab("")+scale_y_continuous(expand = expansion(mult = c(0, 0.05)))+scale_x_discrete(expand = expansion(add = c(0.5, 0.5)))
+
+#ggsave(hosts_assigned_plot,filename = "assets/hostAssigment.png",device = "png",width=300,height = 200,unit="mm",dpi=300)
+
+# Calculate prevalence per contig (NOT TAKING INTO ACCOUNT STUNTED STATUS)
+vPOP_metadata_cov = vPOP_coverage_lifeStyle %>% left_join(all_children[,c(1,2,3,4,6,7,8,9,17,18)],
+                                               by = c("sample" = "accession"),keep=F)
+NumberInfants=length(unique(vPOP_metadata_cov$subjectID.x))
+
+vPOP_prevalence_all <- vPOP_metadata_cov %>% ungroup()%>% group_by(contig) %>%
+  summarize(prevalence = n_distinct(subjectID.x)/NumberInfants, .groups = "drop") 
+
+vPOP_prevalence_all <- vPOP_prevalence_all %>%  mutate(category_prevalence = case_when(
+    prevalence >= 0.7 ~ "Common", prevalence < 0.2 ~ "Rare", TRUE ~ "Moderate")) %>% 
+  mutate(category_prevalence = factor(category_prevalence, levels = c("Rare", "Moderate", "Common")))
+
+label_counts <- vPOP_prevalence_all %>%
+  add_count(category_prevalence) %>%
+  mutate(prevalence_label = paste0(category_prevalence, " (n=", n, ")"))
+
+label_counts$prevalence_label <- factor(
+  label_counts$prevalence_label,
+  levels = unlist(lapply(c("Rare", "Moderate", "Common"), function(pat) {
+    unique(label_counts$prevalence_label[grep(pat, label_counts$prevalence_label)])
+  }))
+)
+
+prevalence_plot=ggplot(label_counts, aes(x = prevalence, fill = prevalence_label)) +
+    geom_bar() + theme_bw() + 
+  scale_fill_manual(values = prevalence_palette,name = "",
+                    labels = function(x) str_replace(x, " \\(", "\\\n\\(")) +
+    scale_y_sqrt() +
+    xlab("Prevalence") +
+    ylab("No. of vOTUs")+
+    theme_classic(base_size = 20) + 
+  theme(axis.text.x = element_text(angle = 60,hjust = 1,vjust = 1),legend.key.width = unit(3, "cm"),legend.text = element_text(lineheight = 0.8),legend.position = "top",legend.spacing.x = unit(1, "cm"))+
+  guides(fill = guide_legend(nrow = 1, label.position = "top",byrow = TRUE))
+
+#ggsave(prevalence_plot,filename = "assets/prevalence_ALL.png",device = "png",width=300,height = 200,unit="mm",dpi=300)
+
+
+# Persistence Calculations Number of timepoints where a vOTU is present in infant (NOT TAKING INTO ACCOUNT HEALTH STATUS)
+
+vPOP_persistence_ALL= vPOP_metadata_cov %>% ungroup() %>% group_by(subjectID.x,contig) %>% summarise(timepoints=n_distinct(age)) %>%  group_by(contig) %>% summarise(median_persistence=median(timepoints))
+
+vPOP_persistence_ALL <- vPOP_persistence_ALL %>%
+  mutate(category_persistence = case_when(median_persistence >= 2.5 ~ "Highly Persistent",
+    median_persistence < 1.5 ~ "Non Persistent", TRUE ~ "Moderately persistent"
+  )) %>% mutate(category_persistence = factor(category_persistence,                                            levels = c("Non Persistent", "Moderately persistent", "Highly Persistent")))
+
+
+label_counts <- vPOP_persistence_ALL %>%
+  add_count(category_persistence) %>%
+  mutate(persistence_label = paste0(category_persistence, " (n=", n, ")"))
+
+label_counts$persistence_label <- factor(
+  label_counts$persistence_label,
+  levels = unlist(lapply(c("Non", "Moderately", "Highly"), function(pat) {
+    unique(label_counts$persistence_label[grep(pat, label_counts$persistence_label)])
+  }))
+)
+
+persistence_plot=ggplot(label_counts, aes(x = median_persistence, fill = persistence_label)) +
+    geom_bar() + theme_bw() + 
+  scale_fill_manual(values = persistence_palette, name = "",
+                    labels = function(x) str_replace(x, " \\(", "\\\n\\(")) +
+    scale_y_sqrt() +
+    xlab("Persistence") +
+    ylab("No. of vOTUs") + theme_classic(base_size = 20) + 
+  theme(axis.text.x = element_text(angle = 60,hjust = 1,vjust = 1),legend.key.width = unit(5.5, "cm"),legend.text = element_text(lineheight = 0.8),legend.position = "top",legend.spacing.x = unit(2, "cm"))+guides(fill = guide_legend(nrow = 1, label.position = "top",byrow = TRUE))
+
+
+#ggsave(persistence_plot,filename = "assets/persistence_ALL.png",device = "png",width=300,height = 200,unit="mm",dpi=300)
+
+age_diffs <- vPOP_metadata_cov %>% distinct(subjectID.x, contig, age) %>% group_by(subjectID.x, contig) %>% filter(n() > 1) %>% arrange(age) %>% mutate(diff = age - lag(age)) %>% filter(!is.na(diff)) %>% ungroup()
+
+mean_tp <- vPOP_metadata_cov %>% ungroup() %>% group_by(subjectID.x,contig) %>% mutate(timepoints=n_distinct(age)) %>% ungroup() %>% group_by(subjectID.x,contig) %>% mutate(timepoints=n_distinct(age)) %>%
+    group_by(contig) %>%
+    summarise(avg_tp = mean(timepoints, na.rm = TRUE)) %>%
+    mutate(persistence_cat = case_when(
+        avg_tp < 1.5 ~ "Non-persistent",
+        avg_tp >= 1.5 & avg_tp <= 2.5 ~ "Moderately persistent",
+        avg_tp > 2.5 ~ "Highly persistent"
+    )) %>%
+    mutate(persistence_cat = factor(persistence_cat, levels = c(
+        "Non-persistent", 
+        "Moderately persistent", 
+        "Highly persistent"
+    )))
+
+age_diffs_colored <- age_diffs %>%
+    left_join(mean_tp, by = "contig")
+
+days_between_detection=ggplot(age_diffs_colored, aes(x = "", y = diff,fill = persistence_cat)) + 
+  ggdist::stat_halfeye(adjust = .5, width = .6, .width = 0, justification = -.2, 
+        point_colour = NA, alpha = 0.8) +    
+  geom_boxplot(width = .06, outlier.shape = NA, alpha = 0.3, color = "grey50",
+               median.linewidth =1) +
+  ggdist::stat_dots(aes(color = persistence_cat, fill = persistence_cat), 
+        side = "left", justification = 1.1, binwidth = NA, dotsize = 0.5) +
+  scale_color_manual(values = persistence_palette, name = "") +
+  scale_fill_manual(values = persistence_palette, name = "")+
+    labs(title = "Persistence Interval of vOTUs",
+        y = "Days Between Detections",
+        x = "") + coord_flip() + theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+       legend.text = element_text(size = 12,lineheight = 0.8),legend.position = "top",
+      legend.spacing.x = unit(1, "cm"),
+      legend.key.width = unit(2, "cm"))+
+  guides(fill = guide_legend(nrow = 1, label.position = "top",byrow = TRUE))
+
+#ggsave(days_between_detection,filename = "assets/days_between_detection.png",device = "png",width=200,height = 150,unit="mm")
+
+viruses_characterization_ab = plot_grid(life_cycle_qc_plot,hosts_assigned_plot,ncol = 2,labels = c("A","B"),rel_widths = c(0.4,0.6),align = "h",axis = "lr",label_size = 24)
+
+viruses_characterization_cd = plot_grid(prevalence_plot,persistence_plot,ncol = 2,labels = c("C","D"),rel_widths = c(0.5,0.5),align = "h",axis = "lr",label_size = 24)
+viruses_characterization_cd
+
+viruses_characterization= plot_grid(viruses_characterization_ab,viruses_characterization_cd,ncol = 1,labels = c("",""),rel_heights = c(0.6,0.4),align = "h",axis = "lr")
+
+#viruses_characterization
+#ggsave(viruses_characterization,filename = "assets/viruses_characterization.png",device = "png",width=500,height = 400,unit="mm")
+```
+
+### Alpha diversity - Estimates
+
+```{r}
+# Bacteria 
+
+table_alphaDiv = profile %>% group_by(sample) %>% 
+  summarise(sp_obs=specnumber(rel.ab),
+            shannon=diversity(rel.ab,index="shannon"),
+            simpson=diversity(rel.ab,index = "simpson"),
+            pielou=ifelse(sp_obs > 1, shannon / log(sp_obs), 0),
+            n=sum(rel.ab))
+
+df_alphadiv = table_alphaDiv %>% left_join(all_children,by=c("sample"="accession"))
+df_alphadiv = df_alphadiv[!is.na(df_alphadiv$subjectID.x),]
+df_alphadiv$subjectID.x =factor(df_alphadiv$subjectID.x)
+df_alphadiv$trajectory =factor(df_alphadiv$trajectory)
+
+depth_lm=lm(total_reads~age,df_alphadiv)
+summary(depth_lm)
+
+library(mgcv)
+data_gam_bacteria=df_alphadiv
+data_gam_bacteria$shannon_scaled = scale(data_gam_bacteria$shannon)
+
+#NO gamma function because it loses power 
+gam_shannon_bacteria <- gam(shannon_scaled ~ s(age,bs = "tp", by=trajectory) + trajectory + s(total_reads,bs="tp") + trajectory+ s(subjectID.x, bs = "re") , data = data_gam_bacteria)
+AIC(gam_shannon_bacteria)
+summary(gam_shannon_bacteria)
+
+data_gam_bacteria$richness_scaled = scale(data_gam_bacteria$sp_obs)
+gam_richness_bacteria <- gam(richness_scaled ~ s(age,bs = "tp", by=trajectory) + trajectory + s(total_reads,bs="tp") + trajectory+ s(subjectID.x, bs = "re") , data = data_gam_bacteria)
+AIC(gam_richness_bacteria)
+summary(gam_richness_bacteria)
+
+data_gam_bacteria$evenness_scaled = scale(data_gam_bacteria$pielou)
+gam_evenness_bacteria <- gam(evenness_scaled ~ s(age,bs = "tp", by=trajectory) + trajectory + s(total_reads,bs="tp") + trajectory+ s(subjectID.x, bs = "re") , data = data_gam_bacteria)
+AIC(gam_evenness_bacteria)
+summary(gam_evenness_bacteria)
+
+data_gam_bacteria$organism = "Bacteria"
+
+# age grid
+age_range <- seq(min(data_gam_bacteria$age), max(data_gam_bacteria$age)-50, length.out = 10)
+
+emm_richness= emmeans_alpha(gam_richness_bacteria,age_range,data_gam_bacteria)
+emm_richness$metric="Richness"
+emm_shannon= emmeans_alpha(gam_shannon_bacteria,age_range,data_gam_bacteria)
+emm_shannon$metric="Shannon"
+emm_pielou= emmeans_alpha(gam_evenness_bacteria,age_range,data_gam_bacteria)
+emm_pielou$metric="Pielou's"
+
+emm_both=rbind(emm_richness,emm_shannon,emm_pielou)
+emm_both$organism="Bacteria"
+
+#Phages
+df_alpha_all = vPOP_coverage_lifeStyle %>% group_by(sample) %>%
+  summarise(sp_obs=specnumber(meandepth),
+            shannon=diversity(meandepth,index="shannon"),
+            simpson=diversity(meandepth,index = "simpson"),
+            n=sum(meandepth))
+
+df_alpha_all = df_alpha_all %>% left_join(all_children[,c(1,2,3,4,6,7,8,9,17,18)],
+                                               by = c("sample" = "accession"),keep=F)
+
+df_alpha_all_lifeCycle = vPOP_coverage_lifeStyle %>% group_by(sample,replication_cycle) %>%
+  summarise(sp_obs=specnumber(meandepth),
+            shannon=diversity(meandepth,index="shannon"),
+            simpson=diversity(meandepth,index = "simpson"),
+            pielou=ifelse(sp_obs > 1, shannon / log(sp_obs), 0),
+            n=sum(meandepth))
+
+df_alpha_all_lifeCycle = df_alpha_all_lifeCycle %>% left_join(all_children[,c(1,2,3,4,6,7,8,9,17,19)],by = c("sample" = "accession"),keep=F)
+
+df_alpha_all_lifeCycle = df_alpha_all_lifeCycle %>% left_join(read_mapp_dist,by=c("sample"="accession"))
+
+#Temperate phages alpha diversity
+data_gam=df_alpha_all_lifeCycle  %>% dplyr::filter(replication_cycle %in% c("Temperate"))
+data_gam$subjectID.x=factor(data_gam$subjectID.x)
+data_gam$trajectory=factor(data_gam$trajectory)
+
+#GAM richness, Shannon, Simpson and Pielou's evenness
+data_gam$sp_obs_scaled= scale(data_gam$sp_obs)
+richness_gam <-  gam(sp_obs_scaled ~ trajectory + s(age,by=trajectory) + s(total_reads,bs="tp") + s(subjectID.x, bs = "re") , data = data_gam,method = "REML")
+AIC(richness_gam)
+summary(richness_gam)
+
+data_gam$shannon_scaled= scale(data_gam$shannon)
+shannon_gam <- gam(shannon_scaled  ~ trajectory + s(age,by=trajectory) + s(total_reads,bs="tp") + s(subjectID.x, bs = "re") , data = data_gam,method = "REML")
+AIC(shannon_gam)
+summary(shannon_gam)
+
+data_gam$pielou_scaled = scale(data_gam$pielou)
+pielou_gam <- gam(pielou_scaled  ~ trajectory +s(age,by=trajectory) + s(total_reads,bs="tp") + s(subjectID.x, bs = "re") , data = data_gam,method = "REML")
+AIC(pielou_gam)
+summary(pielou_gam)
+
+
+# Define a range of ages to evaluate
+age_range <- seq(min(data_gam$age), max(data_gam$age), length.out = 10)
+
+emm_richness= emmeans_alpha(richness_gam,age_range,data_gam)
+emm_richness$metric="Richness"
+emm_shannon= emmeans_alpha(shannon_gam,age_range,data_gam)
+emm_shannon$metric="Shannon"
+emm_pielou= emmeans_alpha(pielou_gam,age_range,data_gam)
+emm_pielou$metric="Pielou's"
+
+emm_phages=rbind(emm_richness,emm_shannon,emm_pielou)
+emm_phages$organism = "Temperate Phages"
+emm_both = rbind(emm_both,emm_phages)
+emm_both$metric = factor(emm_both$metric,levels=c("Shannon","Richness","Pielou's"))
+
+pvalues_emms <- rbind(analyze_age_pairwise(shannon_gam, data_gam, age_range, "phages"),analyze_age_pairwise(gam_shannon_bacteria, data_gam_bacteria, age_range, "bacteria"))
+
+write.csv(pvalues_emms,file="assets/pvalues_shannonEMMs.csv",quote = F)
+
+summ_richness_bacteria = summary(gam_richness_bacteria)
+summ_evenness_bacteria = summary(gam_evenness_bacteria)
+summ_shannon_bacteria = summary(gam_shannon_bacteria)
+
+dat_r2_AIC <- data.frame(r2 = c(round(summ_richness_bacteria$r.sq,digits = 2),round(summ_evenness_bacteria$r.sq,digits = 2), round(summ_shannon_bacteria$r.sq,digits = 2)), metric = c("Richness", "Pielou's", "Shannon"),dev=c(round(summ_richness_bacteria$dev.expl,digits = 2),round(summ_evenness_bacteria$dev.expl,digits = 2), round(summ_shannon_bacteria$dev.expl,digits = 2)))
+dat_r2_AIC$label_r2 = paste("R^2 == ",dat_r2_AIC$r2,sep = " ")
+dat_r2_AIC$label_dev = paste("Dev.Exp == ",dat_r2_AIC$dev,sep = " ")
+dat_r2_AIC$metric = factor(dat_r2_AIC$metric,levels = c("Shannon","Richness", "Pielou's"))
+
+alpha_healthy=ggplot(emm_both[emm_both$trajectory=="Consistent normal growth" & emm_both$organism=="Bacteria",], aes(x = age, y = emmean,group=metric)) + geom_line(size=1,color=colorblind_palette[1])+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL),alpha=0.2,fill=colorblind_palette[1]) +
+ labs(x = "Infant chronological age (days)",y = "GAM - EMMs (Z-Score)") +
+  facet_wrap(~metric)+theme_classic(base_size = 30)+theme(strip.text = element_text(face="bold"),plot.margin = ggplot2::margin(t = 5, r = 20, b = 5, l = 10))+ scale_y_continuous(n.breaks = 8)+geom_text(data  = dat_r2_AIC, mapping = aes(x = -Inf, y = 1.2, label = label_r2), hjust   = -0.1, vjust   = -1,parse = T)+geom_text(data  = dat_r2_AIC, mapping = aes(x = -Inf, y = 1.0, label = label_dev), hjust   = -0.1, vjust   = -1,parse = T)+labs(title="Bacterial communities alpha diversity")
+alpha_healthy
+
+summ_richness_p = summary(richness_gam)
+summ_evenness_p = summary(pielou_gam)
+summ_shannon_p = summary(shannon_gam)
+
+dat_r2_AIC <- data.frame(r2 = c(round(summ_richness_p$r.sq,digits = 2),round(summ_evenness_p$r.sq,digits = 2), round(summ_shannon_p$r.sq,digits = 2)), metric = c("Richness", "Pielou's", "Shannon"),dev=c(round(summ_richness_p$dev.expl,digits = 2),round(summ_evenness_p$dev.expl,digits = 2), round(summ_shannon_p$dev.expl,digits = 2)))
+dat_r2_AIC$label_r2 = paste("R^2 == ",dat_r2_AIC$r2,sep = " ")
+dat_r2_AIC$label_dev = paste("Dev.Exp == ",dat_r2_AIC$dev,sep = " ")
+dat_r2_AIC$metric = factor(dat_r2_AIC$metric,levels = c("Shannon","Richness", "Pielou's"))
+
+alpha_healthy_p=ggplot(emm_both[emm_both$organism=="Temperate Phages" & emm_both$trajectory=="Consistent normal growth",], aes(x = age, y = emmean,group=metric)) + geom_line(size=1,color=colorblind_palette[1])+geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL),alpha=0.2,fill=colorblind_palette[1]) + labs(x = "Infant chronological age (days)", y = "GAM - EMMs (Z-Score)") +
+  facet_wrap(~metric)+theme_classic(base_size = 30)+theme(strip.text = element_text(face="bold"),plot.margin = ggplot2::margin(t = 5, r = 20, b = 5, l = 10))+geom_text(data  = dat_r2_AIC, mapping = aes(x = -Inf, y = 0.8, label = label_r2), hjust   = -0.1, vjust   = -1,parse = T)+geom_text(data  = dat_r2_AIC, mapping = aes(x = -Inf, y = 0.6, label = label_dev), hjust   = -0.1, vjust   = -1,parse = T)+labs(title="Temperate phage communities alpha diversity")
+alpha_healthy_p
+
+alpha_comparing=ggplot(emm_both[emm_both$metric=="Shannon",], aes(x = age, y = emmean,color=trajectory,group=trajectory))+geom_line(size=1)+geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL),position = position_dodge(),alpha=0.6) +  scale_color_manual(values=colorblind_palette,name="",labels = function(x) str_wrap(x, width = 20))+ labs(x = "Infant chronological age (days)",y = "Shannon - EMM (Z-Score)") +
+  facet_grid(~organism,scales = "free")+theme_classic(base_size = 30)+theme(plot.margin = ggplot2::margin(t = 5, r = 20, b = 5, l = 10),legend.text = element_text(lineheight = 0.8),legend.spacing.y = unit(2, "cm"),legend.box = "horizontal")+guides(color = guide_legend(ncol = 1))
+alpha_comparing
+  
+
+#Comparison real data scaled shannon. 
+data_comparing= data.frame(sample=data_gam_bacteria$sample,shannon_bacteria=data_gam_bacteria$shannon_scaled)
+data_comparing = data_comparing %>% left_join(data_gam[,c(1,20)],by="sample") 
+names(data_comparing)[3]="shannon_temperate"
+
+data_comparing = data_comparing %>% left_join(all_children,by=c("sample"="accession"))
+
+#Age clusters 
+set.seed(1208)
+age_clusters=kmeans(data_comparing$age, 4)
+data_comparing$cluster_age=age_clusters[["cluster"]]
+
+clusters_order=data.frame(mean_age=age_clusters$centers,cluster=1:length(age_clusters$centers))
+clusters_order$age_range=c("12-73","395-626","78-159","170-385")
+clusters_order$age_range=factor(clusters_order$age_range,levels=c("12-73","78-159","170-385","395-626"))
+
+data_comparing= data_comparing %>% left_join(clusters_order,by=c("cluster_age"="cluster"))
+
+data_comparing = data_comparing[,c("sample","age","shannon_bacteria","shannon_temperate","age_range","trajectory")]
+
+data_comparing_Healthy = data_comparing[data_comparing$trajectory =="Consistent normal growth",]
+data_comparing_melt=reshape2::melt(data_comparing_Healthy,id.vars = c("sample","age","age_range","trajectory"),measure.vars = c("shannon_bacteria","shannon_temperate"))
+
+shannon_organisms = ggplot(data_comparing_melt,aes(x=age_range,y=value,colour = variable))+
+  geom_boxplot(alpha=0.5,size=0.5,position = position_dodge())+
+  geom_jitter(size=0.7,position = position_jitterdodge()) +
+  scale_color_manual(labels = c("Bacteria","Temperate Phages"),values = organism_palette)+ xlab("Infant chronological age bins (days)")+ylab("Shannon (Z-score)")+stat_compare_means(method = "wilcox.test", label = "p.signif",label.y = 2.5,size=7,hide.ns = T)+labs(color="")+theme_classic(base_size = 30)+theme(plot.margin = ggplot2::margin(t = 5, r = 20, b = 5, l = 10))
+
+#theme(strip.text = element_text(size = 15,face="bold"),legend.text = element_text(size = 15), legend.title = element_text(size = 15),plot.margin = ggplot2::margin(t = 5, r = 20, b = 5, l = 10))
+
+alpha_metrics = plot_grid(alpha_healthy_p,alpha_healthy,shannon_organisms,alpha_comparing,ncol = 1,labels = c("A","B","C","D"),rel_heights = c(0.25,0.25,0.25,0.25),align = "h",axis = "lr",label_size = 24)
+
+ggsave(alpha_metrics,filename = "assets/alpha.png",device = "png",width=700,height = 700,unit="mm")
+
+```
+
+## Maturation curves
+
+### Bacteria
+
+```{r}
+#| message: false
+set.seed(1208)
+
+infants_healthy = all_children$subjectID.x[all_children$trajectory == "Consistent normal growth"]
+sampled_infants <- sample(unique(infants_healthy),size = length(unique(infants_healthy))*0.8)
+
+sampled_timepoints=all_children[which(all_children$subjectID.x %in% sampled_infants),"age"]
+
+sampling_train = data.frame(subjectID.x=sampled_infants,set="train")
+sampling_train = all_children %>% select(subjectID.x,age) %>% left_join(sampling_train,by="subjectID.x") %>% mutate(set  = replace_na(set, "test"))
+
+ggplot(sampling_train,aes(x=age))+geom_histogram(binwidth = 50)+theme_classic()
+ggplot(sampling_train,aes(x=age))+geom_histogram(binwidth = 50)+facet_wrap(~set) + theme_classic()
+
+predictors = profile_metadata %>% ungroup() %>% select(starts_with("s__")) %>% names
+
+list_datasets_bacteria = selectDatasets(profile_metadata,sampled_infants,predictors)
+df_importance_bact = feature_selection(list_datasets_bacteria[[1]],predictors)
+
+#### Healthy maturation model #### 
+mat_bact_heatmap=plots_maturation(df_importance_bact,list_datasets_bacteria$train_healthy)
+mat_bacteria_train_test = normal_growth_maturation(train_df = list_datasets_bacteria$train_healthy,
+                                          predictors = df_importance_bact$species,
+                                          test_df_allTrajectories = list_datasets_bacteria$test_all,
+                                          organism = "Bacteria")
+```
+
+### Viral Clusters
+
+```{r}
+#| message: false
+
+#### vOTUS abundance  matrix 
+vPOP_matrix=read.csv("data/processed/vOTU_abundance_matrix.csv",h=T)
+# ONLY 23679 vOTUs WERE PRESENT IN THE SAMPLES, AFTER FILTERING OF THE MAPPED READS STATS
+vPOP_matrix=vPOP_matrix[,-1]
+vPOP_matrix$contig=factor(vPOP_matrix$contig)
+rownames(vPOP_matrix)=vPOP_matrix$contig
+vPOP_matrix=vPOP_matrix[,-1]
+
+#Remove samples with a total coverage less than 1000.
+to_filter = vPOP_coverage %>% group_by(sample) %>% summarize(total=sum(meandepth)) %>% arrange(total) %>% filter(total < 1000)
+
+#to_filter %>% left_join(children_0_300,by = c("sample"="accession"))
+vPOP_matrix = vPOP_matrix[,-which(names(vPOP_matrix) %in% to_filter$sample)]
+vPOP_matrix = vPOP_matrix[,which(names(vPOP_matrix) %in% unique(all_children$accession))]
+
+#remove contigs with abundance equal to 0.
+remove_vTOUs=rownames(vPOP_matrix)[rowSums(vPOP_matrix) == 0]
+
+vPOP_matrix = vPOP_matrix[-which(rownames(vPOP_matrix) %in% remove_vTOUs),]
+
+vPOP_matrix=t(vPOP_matrix)
+vPOP_matrix=as.matrix(vPOP_matrix)
+class(vPOP_matrix)
+vPOP_matrix[is.na(vPOP_matrix)] = 0
+
+#All vPOPs Maturation
+vPOP_df_all = data.frame(vPOP_matrix)
+names(vPOP_df_all)=colnames(vPOP_matrix)
+vPOP_df_all$sample=rownames(vPOP_df_all)
+
+vPOP_df_all = vPOP_df_all %>% left_join(all_children[,c(1,2,3,4,6,7,8,9,17,19)],
+                                               by = c("sample" = "accession"))
+
+temperate_contigs=vPOP_coverage_lifeStyle %>% select(contig,replication_cycle) %>% distinct() %>% filter(replication_cycle=="Temperate") %>% pull(contig)
+
+vPOP_df_temperate = vPOP_df_all[,colnames(vPOP_df_all) %in% c(temperate_contigs,"sample","age","subjectID.x","trajectory")]
+
+#### viral cluster assignment 
+viral_family_cluster=read.table("data/processed/viral_cluster_assignment.csv",h=T)
+
+viral_family_cluster = viral_family_cluster[which(viral_family_cluster$genome %in% names(vPOP_df_temperate)),]
+
+viral_family_cluster$best_taxonomy_corrected = ifelse(viral_family_cluster$best_taxonomy=="<NA>",paste("singleton_",viral_family_cluster$genome,sep=""),viral_family_cluster$best_taxonomy)
+
+cluster_list= split(viral_family_cluster$genome, viral_family_cluster$best_taxonomy_corrected)
+
+viral_cluster_df <- as.data.frame(lapply(cluster_list, function(cols) {
+  rowSums(vPOP_df_temperate[, cols, drop = FALSE])
+}))
+
+viral_cluster_df <- cbind(vPOP_df_temperate[, c("sample", "age","subjectID.x","trajectory")], viral_cluster_df)
+
+clusters = viral_cluster_df %>% select(-sample,-age,-subjectID.x,-trajectory) %>% names() 
+
+NumberInfants = length(unique(viral_cluster_df$subjectID.x))
+vc_prevalence_df = viral_cluster_df %>% pivot_longer(cols=clusters,names_to = "VC",values_to="rel.abund")  %>% ungroup() %>% filter(rel.abund != 0) %>% group_by(VC) %>% summarize(prevalence = n_distinct(subjectID.x)/NumberInfants, .groups = "drop") %>%  mutate(category_prevalence = case_when(prevalence >= 0.7 ~ "Common", prevalence < 0.2 ~ "Rare", TRUE ~ "Moderate")) %>% mutate(category_prevalence = factor(category_prevalence, levels = c("Rare", "Moderate", "Common")))
+
+label_counts <- vc_prevalence_df %>%  add_count(category_prevalence) %>%  mutate(prevalence_label = paste0(category_prevalence, " (n=", n, ")"))
+
+label_counts$prevalence_label <- factor(
+  label_counts$prevalence_label,
+  levels = unlist(lapply(c("Rare", "Moderate", "Common"), function(pat) {
+    unique(label_counts$prevalence_label[grep(pat, label_counts$prevalence_label)])
+  }))
+)
+
+prevalence_plot_vc=ggplot(label_counts, aes(x = prevalence, fill = prevalence_label)) +
+    geom_bar() + theme_bw() + 
+  scale_fill_manual(values = prevalence_palette,name = "",
+                    labels = function(x) str_replace(x, " \\(", "\\\n\\(")) +
+    scale_y_sqrt() +
+    xlab("Prevalence") +
+    ylab("No. of Temperate VCs") +
+    ggtitle(paste("Prevalence Distribution")) +
+    theme_classic(base_size = 20) +
+     theme(
+      axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1),
+      axis.title = element_text(size = 13),
+      axis.text = element_text(size = 12),
+      legend.key.width = unit(3, "cm"),
+      legend.text = element_text(size = 12,lineheight = 0.8),legend.position = "top",
+      legend.spacing.x = unit(1, "cm"),
+      title = element_text(size = 14))+
+  guides(fill = guide_legend(nrow = 1, label.position = "top",byrow = TRUE))
+
+#prevalence_plot_vc
+#ggsave(prevalence_plot_vc,filename = assets/prevalence_VC_Temp.png",device = "png",width=300,height = 200,unit="mm",dpi=300)
+
+
+viral_cluster_to_PHF = viral_family_cluster %>% left_join(host_pred_split, by = c("genome"="Virus"))
+viral_cluster_to_PHF$best_taxonomy_new = gsub("[:|]", ".", viral_cluster_to_PHF$best_taxonomy_corrected)
+viral_cluster_VC_to_PHF = viral_cluster_to_PHF %>% mutate(VC_ID = paste0("VC", match(best_taxonomy_new, unique(best_taxonomy_new)))) %>% distinct()
+
+viral_cluster_to_VC = viral_cluster_VC_to_PHF[,c(13,14)] %>% distinct()
+change_names_df=data.frame(Tax=names(viral_cluster_df))
+change_names_df = change_names_df %>% left_join(viral_cluster_to_VC,by=c("Tax"="best_taxonomy_new"))
+
+names(viral_cluster_df)[-c(1,2,3,4)] = change_names_df$VC_ID[-c(1,2,3,4)]
+
+
+predictors_VC= viral_cluster_df %>% select(starts_with("VC")) %>% names()
+list_datasets_temperate = selectDatasets(viral_cluster_df,sampled_infants,predictors_VC)
+
+df_importance_VC = feature_selection(list_datasets_temperate$train_healthy,predictors_VC)
+
+#### Healthy maturation model #### 
+mat_temperate_heatmap=plots_maturation(df_importance_VC,list_datasets_temperate$train_healthy)
+
+#Remove samples were important VCs were always 0 in train and test sets. 
+train_filtered = list_datasets_temperate$train_healthy
+to_keep=train_filtered %>% select(df_importance_VC$species) %>% rowSums()!=0
+train_filtered=train_filtered[to_keep,]
+
+test_all_filtered = list_datasets_temperate$test_all
+to_keep=test_all_filtered %>% select(df_importance_VC$species) %>% rowSums()!=0
+test_all_filtered=test_all_filtered[to_keep,]
+
+mat_temperate_train_test = normal_growth_maturation(train_df = train_filtered,
+                                                   predictors = df_importance_VC$species,
+                                                   test_df_allTrajectories = test_all_filtered,
+                                                   organism = "Temperate Phages")
+
+```
+
+#### Plots maturation normal growth
+
+```{r}
+#Plots
+
+df_vc_phf = viral_cluster_VC_to_PHF %>% filter(VC_ID %in% df_importance_VC$species) %>% group_by(family,VC_ID) %>% summarise(No_vOTUs=n_distinct(genome))
+
+df_vc_phf$family = factor(df_vc_phf$family,levels=c("Bacteroidaceae","Lachnospiraceae","Ruminococcaceae","Enterobacteriaceae","Erysipelotrichaceae","Bifidobacteriaceae","Lactobacillaceae","Selenomonadaceae")) 
+
+plot_vc_phf=ggplot(df_vc_phf,aes(x=reorder(VC_ID,as.numeric(factor(family))),y=No_vOTUs,fill=family))+geom_bar(stat="identity")+scale_fill_manual(values=cbPalette_hosts)+theme_classic(base_size = 15)+theme(axis.text.x = element_text(angle=90))+labs(fill="PHF")+xlab("")+scale_y_continuous(n.breaks = 4)
+
+newdata = rbind(mat_bacteria_train_test[[1]],mat_temperate_train_test[[1]])
+predictions_healthy = rbind(mat_bacteria_train_test[[2]],mat_temperate_train_test[[2]])
+
+data_r2 = data.frame(organism=c("Bacteria","Temperate Phages"),r2=c(r2_label(mat_bacteria_train_test[[2]],"Bacteria"),r2_label(mat_temperate_train_test[[2]],"Phages")))
+
+plot_maturation_healthy = ggplot()+geom_line(data= newdata, aes(x = age, y = pred_age, linetype = organism),color = colorblind_palette[1], size = 1.2) +
+    labs(x = "Infant chronological age", y = "Microbiome age") +
+    theme_classic(base_size = 30)+scale_color_manual(values=colorblind_palette,name="")+ geom_point(data=predictions_healthy,aes(x=age,y=pred_age,shape=organism),color = colorblind_palette[1])+ scale_x_continuous(expand = expansion(mult = 0.1))+scale_shape_manual(values = c(16,0))+geom_abline(slope = 1,intercept = 0)+geom_text(data= data_r2, aes(x = 0, y = 480, label = r2), hjust   = -0.1, vjust   = -1,parse = T)+facet_wrap(~organism)+theme(legend.position = "top",legend.key.size = unit(3, "cm"))+labs(shape="",linetype="")
+plot_maturation_healthy
+
+#plot_VC_maturation_healthy_weaning = mat_temperate_train_test[[6]]
+
+VC_abund_melt = list_datasets_temperate[[1]] %>% pivot_longer(cols=starts_with("VC"),names_to = "VC_ID",values_to = "rel.abund_temp") %>% arrange(sample,age)
+
+BC_abund_melt = list_datasets_bacteria[[1]] %>% filter(sample %in% VC_abund_melt$sample) %>% pivot_longer(cols=starts_with("s__"),names_to = "Bacterial_Species",values_to = "rel.abund_bact") %>% arrange(sample,age)
+
+clean_bac_species = BC_abund_melt$Bacterial_Species %>% str_remove("^s__") %>% str_replace_all("_", " ")
+
+fam2species <- viral_cluster_VC_to_PHF %>% filter(species %in% clean_bac_species) %>% select(family,species)
+
+#REVIEW HOW MANY ARE LOST HERE ! 
+fam2species = fam2species %>% distinct()
+
+imp_clusters = df_importance_VC$species
+
+PHF = viral_cluster_VC_to_PHF %>% filter(VC_ID %in% imp_clusters) %>% select(family) %>% distinct() %>% pull()
+
+species_in_impPHF = fam2species %>% filter(family %in% PHF) %>% distinct()
+species_in_impPHF$species_bac = species_in_impPHF$species %>% str_replace_all("^", "s__") %>% str_replace_all(" ","_") 
+
+#REVIEW HOW MANY ARE LOST HERE ! 
+BC_abund_melt_speciesin_impPHF = BC_abund_melt %>% filter(BC_abund_melt$Bacterial_Species %in% species_in_impPHF$species_bac) %>% left_join(species_in_impPHF,by=c("Bacterial_Species"="species_bac"))
+
+imp_VC_to_PHF = viral_cluster_VC_to_PHF %>% filter(VC_ID %in% imp_clusters) %>% select(family,VC_ID) %>% distinct()
+
+impVC_abund_melt_phf= VC_abund_melt %>% filter(VC_ID %in% imp_clusters) %>% left_join(imp_VC_to_PHF,by="VC_ID")
+
+Abund_VC_bacFam = BC_abund_melt_speciesin_impPHF %>% group_by(sample,age,family) %>% summarise(rel.abund_bact_fam = sum(rel.abund_bact)) %>% left_join(impVC_abund_melt_phf,by=c("sample","age","family")) %>% ungroup()
+
+Abund_VC_bacFam %>% group_by(VC_ID) %>% mutate(cor_bac_vc = cor(rel.abund_bact_fam,rel.abund_temp))
+
+#mean relative abundance of bacterial family in sample.
+mean_relab_bac_persample = Abund_VC_bacFam %>% select(-age) %>% pivot_wider(id_cols = sample,names_from = family,values_from = rel.abund_bact_fam,values_fn = mean) %>% arrange(sample)
+
+mean_relab_VC_persample =  Abund_VC_bacFam %>% select(-age) %>% pivot_wider(id_cols = sample,names_from = VC_ID,values_from = rel.abund_temp,values_fn = mean) %>% arrange(sample)
+
+corM = cor(mean_relab_bac_persample[,-1],mean_relab_VC_persample[,-1],method = "kendall")
+
+cor_df = as.data.frame(corM) %>% rownames_to_column("Family") %>% pivot_longer(cols = -Family,names_to = "VC_ID",values_to = "kendall_cor") %>% left_join(imp_VC_to_PHF,by="VC_ID") %>% rename(host=family)
+
+row_order <- hclust(dist(corM))$order
+col_order <- hclust(dist(t(corM)))$order
+
+cor_df <- cor_df %>%mutate(Family = factor(Family, levels = rownames(corM)[row_order]),
+         VC_ID = factor(VC_ID, levels = colnames(corM)[col_order]),
+         host = factor(host, levels = levels(Family)))
+
+plot_correlation_vc_bacFam = ggplot(cor_df,aes(x=VC_ID,y=Family,fill=kendall_cor))+geom_tile()+theme_classic(base_size = 27)+scale_fill_distiller(palette = "BrBG", limit = c(-1, 1))+labs(x="",y="",fill = expression(paste("",tau)))+facet_grid(.~ host, scales = "free_x", space = "free_x")+theme(axis.text.x = element_text(angle = 90,vjust=0.5),strip.text = element_text(face = "italic",angle = 90,size=15),panel.spacing = unit(0.1, "lines"),legend.position = "right",legend.key.width = unit(0.3,"cm"))+guides(fill = guide_colorbar(title.vjust = 0.8,title.hjust = 0.1,barwidth = 1))
+
+
+Abund_VC_bacFam_melted = Abund_VC_bacFam %>% pivot_longer(cols = starts_with("rel.abund"),names_to = "organism",values_to = "rel.abund") %>% group_by(VC_ID,organism) %>% mutate(scaled_rel_abund = scale(rel.abund)) %>% mutate(age_bins = cut(age, breaks = seq(0, 650, by = 50), right = FALSE)) %>% group_by(age_bins,family,VC_ID,organism) %>% mutate(mean_relabund=mean(rel.abund))
+
+p1= Abund_VC_bacFam %>% pivot_longer(cols = starts_with("rel.abund"), names_to = "organism",
+    values_to = "rel.abund") %>% mutate(age_bins = cut(age, breaks = seq(0, 650, by = 50), right = FALSE)) %>%  group_by(age_bins, family, VC_ID, organism) %>% summarise(mean_relabund = mean(rel.abund, na.rm = TRUE), .groups = "drop") %>%  group_by(VC_ID, organism) %>% mutate(scaled_rel_abund = as.numeric(scale(mean_relabund))) %>% ungroup() %>% mutate(family = factor(family, levels = levels(cor_df$Family)), VC_ID = factor(VC_ID, levels = levels(cor_df$VC_ID))) %>% ggplot(aes(x = age_bins, y = organism, fill = scaled_rel_abund)) +  geom_tile() + scale_fill_viridis_c(option = "plasma", name = "Mean Rel.Abund") + facet_wrap(family~VC_ID,ncol = 3) + theme_classic(base_size = 30) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave(p1,filename = "assets/plot_bac_vc_abund.png",device = "png",width=600,height = 600,unit="mm")
+
+VC_mat_comparison_ab = plot_grid(plot_maturation_healthy,plot_correlation_vc_bacFam,ncol = 2, labels = c("A","B"),rel_widths = c(0.5, 0.5),align = "h",axis = "lrtb",label_size = 24)
+
+VC_mat_comparison_cd = plot_grid(ggdraw(mat_bact_heatmap[[2]]$gtable)+theme_classic(base_size = 25),ggdraw(mat_temperate_heatmap[[2]]$gtable)+theme_classic(base_size = 25),ncol = 2, labels = c("C","D"),rel_widths = c(0.6, 0.4),align = "h",axis = "lrtb",label_size = 24)
+
+VC_mat_comparison = plot_grid(VC_mat_comparison_ab,VC_mat_comparison_cd,ncol = 1,rel_heights = c(0.4,0.6),align = "h",axis = "lrtb")
+ggsave(VC_mat_comparison,filename = "assets/NormalGrowth_maturation.png",device = "png",width=600,height = 800,unit="mm")
+
+R2_plots = plot_grid(mat_bact_heatmap[[1]],mat_temperate_heatmap[[1]],ncol = 2,labels = c("A","B"),rel_widths = c(0.5,0.5),align = "h",axis = "lrtb",label_size = 20)
+ggsave(R2_plots,filename = "assets/R2_plots.png",device = "png",width=400,height = 300,unit="mm")
+
+```
+
+#### OLD - Correlation VCs with bacteria
+
+```{r}
+#CORRELATION WITH BACTERIA
+
+
+VC_mat_comparison = plot_grid(VC_mat_comparison_ab,VC_mat_comparison_cd,ncol = 1,rel_heights = c(0.2,0.6,0.2),align = "h",axis = "lrtb")
+#ggsave(VC_mat_comparison,filename = "assets/NormalGrowth_maturation.png",device = "png",width=600,height = 800,unit="mm")
+
+#ggsave(VC_mat_comparison,filename = "assets/NormalGrowth_microdiv.png",device = "png",width=600,height = 800,unit="mm")
+
+
+imp_vOTU_abundance = vPOP_df_temperate[vPOP_df_temperate$trajectory == "Consistent normal growth",colnames(vPOP_df_temperate)%in% c(df_importance_VC$species,"sample")]
+
+imp_bact_abundance = vOTU_nucl_div_df[vOTU_nucl_div_df$trajectory == "Consistent normal growth",colnames(vOTU_nucl_div_df)%in% c(df_importance_bac$species,"sample")]
+
+common_samples = intersect(impNucl_vOTU_abundance$sample,impNucl_vOTU_nuclDiv$sample)
+
+impNucl_vOTU_abundance = impNucl_vOTU_abundance[impNucl_vOTU_abundance$sample %in% common_samples,] %>% arrange(sample)
+
+impNucl_vOTU_nuclDiv = impNucl_vOTU_nuclDiv[impNucl_vOTU_nuclDiv$sample %in% common_samples,] %>% arrange(sample)
+
+impNucl_vOTU_abundance_reORD <- impNucl_vOTU_abundance[, match(colnames(impNucl_vOTU_nuclDiv), colnames(impNucl_vOTU_abundance))]
+
+mat_corr = cor(impNucl_vOTU_abundance_reORD[,-1],impNucl_vOTU_nuclDiv[,-1])
+corrplot::corrplot(mat_corr,tl.pos = "n")
+
+
+
+dataset_temp = list_datasets_temperate$train_healthy %>% select(sample,df_importance_VC$species) %>% filter(rowSums(select(.,df_importance_VC$species))!=0)
+
+dataset_temp_melt = melt(dataset_temp)
+names(dataset_temp_melt)=c("sample","VC_ID","rel.abund")
+
+VC_to_PHF = viral_cluster_VC_to_PHF[,c("family","VC_ID")] %>% distinct()
+dataset_temp_melt = dataset_temp_melt %>% left_join(VC_to_PHF,by="VC_ID")
+
+dataset_bact = list_datasets_bacteria$train_healthy %>% select(sample,df_importance_bact$species) %>% filter(rowSums(select(.,df_importance_bact$species))!=0)
+
+dataset_bact_melt = melt(dataset_bact)
+names(dataset_bact_melt)=c("sample","species","rel.abund")
+
+fam2species = read.table("data/raw/bact_species2fam.txt",h=F,sep = " ")
+names(fam2species) = c("family","species")
+fam2species$family = gsub("f__","",fam2species$family)
+fam2species = fam2species %>% distinct()
+
+dataset_bact_melt = dataset_bact_melt %>% left_join(fam2species,by = "species")
+
+bac_family <- dataset_bact_melt %>% group_by(sample, family) %>% summarise(bact_rel_Abund = sum(rel.abund)) %>% pivot_wider(names_from = family, values_from = bact_rel_Abund, values_fill = 0)
+
+vc_phf <- dataset_temp_melt %>% group_by(sample, family) %>% summarise(vc_rel_Abund = sum(rel.abund)) %>% pivot_wider(names_from = family, values_from = vc_rel_Abund, values_fill = 0)
+
+common_samples = intersect(bac_family$sample,vc_phf$sample)
+bac_sorted <- bac_family %>% filter(sample %in% common_samples) %>% arrange(sample)
+vc_sorted  <- vc_phf %>% filter(sample %in% common_samples) %>% arrange(sample)
+
+families_shared = intersect(colnames(vc_sorted),colnames(bac_sorted))[-1]
+names(bac_sorted)
+cor_matrix <- cor(bac_sorted[,-1], vc_sorted[,-1], method = "spearman")
+cor_melted <- melt(cor_matrix)
+colnames(cor_melted) <- c("Bac_Family", "VC_ID", "Rho")
+
+ggplot(cor_melted, aes(x = VC_ID, y = Bac_Family, fill = Rho)) +
+  geom_tile() +
+  # Use your mustard yellow aesthetic for the high correlations
+  scale_fill_gradient2(low = "#0D1B2A", mid = "white", high = "#C5A059", 
+                       midpoint = 0, name = "Spearman\nRho") +
+  theme_classic(base_size = 15) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+        panel.grid = element_blank()) +
+  labs(x = "Viral Clusters (VCs)",y = "Bacterial Families")
+
+cor_results <- data.frame(Family = character(), Spearman_r = numeric())
+for(i in families_shared){
+    r_val <- cor(vc_sorted[[i]], bac_sorted[[i]], method = "spearman")
+    cor_results <- rbind(cor_results, data.frame(Family = i, Spearman_r = r_val))
+}
+
+# Clean up family names (removing the '_VC' or 's__' prefixes if necessary)
+cor_results$Family <- gsub("s__|__VC", "", cor_results$Family)
+cor_results$Family = factor(cor_results$Family,levels=c("Bacteroidaceae","Lachnospiraceae","Ruminococcaceae","Enterobacteriaceae","Erysipelotrichaceae","Bifidobacteriaceae","Lactobacillaceae","Selenomonadaceae")) 
+
+plot_correlation = ggplot(cor_results, aes(x = reorder(Family, Spearman_r), y = Spearman_r,color = Family)) +
+    geom_segment(aes(xend = Family, yend = 0), color = "black") +
+    geom_point(size = 4)+
+    coord_flip() + theme_classic(base_size = 15) +
+    labs(y = "Spearman Correlation (r)",x="") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red")+
+  scale_color_manual(values=cbPalette_hosts)
+plot_correlation
+
+```
+
+#### Across Trajectories - maturation
+
+```{r}
+mat_bacteria_train_test = normal_growth_maturation(train_df = list_datasets_bacteria$train_healthy,
+                                                   predictors = df_importance_bact$species,
+                                                   test_df_allTrajectories = list_datasets_bacteria$test_all,
+                                                   organism = "Bacteria")
+
+mat_temperate_train_test = normal_growth_maturation(train_df = train_filtered,
+                                                    predictors = df_importance_VC$species,
+                                                    test_df_allTrajectories = test_all_filtered,
+                                                    organism = "Temperate Phages")
+
+trajectories_comparison = plot_grid(mat_bacteria_train_test[[7]],mat_temperate_train_test[[7]],ncol = 2,rel_widths = c(0.5,0.5),align = "h",axis = "lrtb",labels = c("A","B"),label_size = 24)
+#ggsave(trajectories_comparison,filename = "assets/trajectories_comparison.png",device = "png",width=500,height = 210,unit="mm")
+```
+
+### viral microdiversity
+
+```{r}
+
+vOTU_nucl_div=read.table("data/processed/vOTU_nucl_div_instrain_filtered.txt",h=F,sep=",")
+
+names(vOTU_nucl_div) = c("sample","scaffold","length","coverage","breadth","nucl_diversity","coverage_median","coverage_std","coverage_SEM","breadth_minCov","breadth_expected","nucl_diversity_median","nucl_diversity_rarefied","nucl_diversity_rarefied_median","breadth_rarefied","conANI_reference","popANI_reference","SNS_count","SNV_count","divergent_site_count","population_divergent_sites","consensus_divergent_sites")
+
+vOTU_nucl_div = vOTU_nucl_div %>% filter(breadth>=0.5 & sample %in% unique(vPOP_df_all$sample)) 
+
+temperate_contigs=vPOP_coverage_lifeStyle %>% select(contig,replication_cycle) %>% distinct() %>% filter(replication_cycle=="Temperate") %>% pull(contig)
+
+#Do I want to do it at the vOTU or VC level
+vOTU_nucl_VC_df = vOTU_nucl_div[vOTU_nucl_div$scaffold %in%temperate_contigs,c("sample","scaffold","nucl_diversity")] %>% left_join(viral_cluster_VC_to_PHF,by = c("scaffold" = "genome")) 
+
+vOTU_nucl_VC_filt_imp_df = vOTU_nucl_VC_df %>% filter(VC_ID %in% df_importance_VC$species) %>% droplevels()
+
+vOTU_nucl_VC_filt_imp_df$family = factor(vOTU_nucl_VC_filt_imp_df$family,levels=c("Bacteroidaceae","Lachnospiraceae","Ruminococcaceae","Enterobacteriaceae","Erysipelotrichaceae","Bifidobacteriaceae","Lactobacillaceae","Selenomonadaceae")) 
+
+plot_nucl_variation = vOTU_nucl_VC_filt_imp_df  %>% ggplot(aes(x=reorder(scaffold,as.numeric(factor(family))),y=(nucl_diversity),color=family))+geom_boxplot()+geom_point(alpha=0.5)+theme_classic(base_size = 30)+theme(axis.text.x  = element_blank())+ylab("Nucleotide Diversity (Log10)")+xlab("vOTUs")+scale_y_log10()+scale_color_manual(values=cbPalette_hosts)+labs(color="")
+plot_nucl_variation
+
+vOTU_nucl_div_toMatrix = vOTU_nucl_div %>% select(sample,scaffold,nucl_diversity) %>% filter(scaffold %in% temperate_contigs)
+
+vOTU_nucl_div_Matrix <- vOTU_nucl_div_toMatrix %>% pivot_wider(names_from = scaffold, values_from = nucl_diversity,values_fill = 0)
+
+rownames(vOTU_nucl_div_Matrix) = vOTU_nucl_div_Matrix$sample
+vOTU_nucl_div_df = vOTU_nucl_div_Matrix %>% left_join(all_children[,c("accession","age","subjectID.x","trajectory")],by = c("sample" = "accession")) %>% drop_na()
+
+predictors_nucl = vOTU_nucl_div_df %>% select(-sample,-age,-subjectID.x,-trajectory) %>% names()
+list_datasets_microdiv<-  selectDatasets(vOTU_nucl_div_df,sampled_infants,predictors_nucl)
+
+df_importance_nucl = feature_selection(list_datasets_microdiv$train_healthy,predictors_nucl)
+
+#### Healthy maturation model #### 
+mat_temp_nucl_heatmap=plots_maturation(df_importance_nucl,list_datasets_microdiv$train_healthy)
+#Supp Figure 6
+mat_temp_nucl_heatmap[[1]]
+
+#Remove samples were important vOTU microdiversity was always 0 in train and test sets. 
+train_filtered = list_datasets_microdiv$train_healthy
+to_keep=train_filtered %>% select(df_importance_nucl$species) %>% rowSums()!=0
+train_filtered=train_filtered[to_keep,]
+
+test_all_filtered = list_datasets_microdiv$test_all
+to_keep=test_all_filtered %>% select(df_importance_nucl$species) %>% rowSums()!=0
+test_all_filtered=test_all_filtered[to_keep,]
+
+
+mat_temp_nucl_train_test = normal_growth_maturation(train_df = train_filtered,
+                                                   predictors = df_importance_nucl$species,
+                                                   test_df_allTrajectories = test_all_filtered,
+                                                   organism = "Temperate Phages NuclDiv")
+
+
+newdata = rbind(mat_temperate_train_test[[1]],mat_temp_nucl_train_test[[1]])
+predictions_healthy = rbind(mat_temperate_train_test[[2]],mat_temp_nucl_train_test[[2]])
+newdata$organism=ifelse(newdata$organism=="Temperate Phages NuclDiv","Nucleotide Diversity","Abundance")
+newdata$organism=factor(newdata$organism,levels = c("Nucleotide Diversity","Abundance"))
+predictions_healthy$organism=ifelse(predictions_healthy$organism=="Temperate Phages NuclDiv","Nucleotide Diversity","Abundance")
+predictions_healthy$organism=factor(predictions_healthy$organism,levels = levels(newdata$organism))
+
+plot_maturation_temperate = ggplot()+geom_line(data= newdata, aes(x = age, y = pred_age, linetype = organism),color = colorblind_palette[1], size = 1.2) +
+    labs(x = "Infant chronological age", y = "Virome age") +
+    theme_classic(base_size = 30)+scale_color_manual(values=colorblind_palette,name="")+ geom_point(data=predictions_healthy,aes(x=age,y=pred_age,shape=organism),color = colorblind_palette[1])+ scale_x_continuous(expand = expansion(mult = 0.1))+scale_shape_manual(values = c(16,0))+geom_abline(slope = 1,intercept = 0)+annotate("text",x=12,y=540,label = r2_label(mat_temperate_train_test[[2]],"Abundance"),parse=T,size=7,hjust=0)+annotate("text",x=12,y=490,label = r2_label(mat_temp_nucl_train_test[[2]],"Nucl_diversity"),parse=T,size=7,hjust=0)+theme(legend.position = "top",legend.key.width = unit(3, "cm"))+labs(shape="",linetype="")
+plot_maturation_temperate
+
+VC_mat_comparison_ab = plot_grid(plot_nucl_variation,plot_maturation_temperate,ncol = 2, labels = c("A","B"),rel_widths = c(0.5, 0.5),rel_heights = c(0.3,0.7),align = "h",axis = "lrtb")
+
+vOTU_nucldiv_melt = list_datasets_microdiv[[1]] %>% select(all_of(df_importance_nucl$species),sample,age) %>% pivot_longer(cols=all_of(df_importance_nucl$species),names_to = "vOTU",values_to = "nucl.div_vOTU") %>% arrange(sample,age)
+
+vOTU_abund_melt = vPOP_df_all %>% filter(sample %in% list_datasets_microdiv[[1]]$sample) %>% select(all_of(df_importance_nucl$species),sample,age) %>% pivot_longer(cols=all_of(df_importance_nucl$species),names_to = "vOTU",values_to = "rel.abund_vOTU") %>% arrange(sample,age)
+
+
+vOTU_abund_nuclDiv = vOTU_nucldiv_melt %>% left_join(vOTU_abund_melt,by=c("sample","age","vOTU")) %>% ungroup()
+
+vOTU_abund_nuclDiv %>% group_by(vOTU) %>% mutate(cor_abund_nucl = cor(nucl.div_vOTU,rel.abund_vOTU))
+
+#mean relative abundance of bacterial family in sample.
+mean_relAbund_persample = vOTU_abund_nuclDiv %>% select(-age) %>% pivot_wider(id_cols = sample,names_from = vOTU,values_from = rel.abund_vOTU,values_fn = mean) %>% arrange(sample)
+
+mean_nuclDiv_persample =  vOTU_abund_nuclDiv %>% select(-age) %>% pivot_wider(id_cols = sample,names_from = vOTU,values_from = nucl.div_vOTU,values_fn = mean) %>% arrange(sample)
+
+corM_phages = cor(mean_relAbund_persample[,-1],mean_nuclDiv_persample[,-1],method = "kendall",use="complete.obs")
+
+cor_df_phages = as.data.frame(corM_phages) %>% rownames_to_column("vOTU_Abundance") %>% pivot_longer(cols = -vOTU_Abundance,names_to = "vOTU_Nucl_Diversity",values_to = "kendall_cor") # %>% left_join(imp_VC_to_PHF,by="VC_ID") %>% rename(host=family)
+
+
+df_vOTUname2number = data.frame(vOTU_ID=paste("vOTU",seq(1:nrow(mat_temp_nucl_heatmap[[3]])),sep=""),vOTU=rownames(mat_temp_nucl_heatmap[[3]]))
+
+clusters_k3 <- cutree(mat_temp_nucl_heatmap[[2]]$tree_row, k = 3) %>% enframe(name = "vOTU", value = "cluster_phase")
+
+plot_correlation_abund_nucl = cor_df_phages %>% filter(!is.na(kendall_cor)) %>% left_join(clusters_k3, by = c("vOTU_Nucl_Diversity"="vOTU")) %>% mutate(phase=case_when(cluster_phase == 1 ~ "pre-weaning",cluster_phase == 2 ~ "early post-weaning",.default = "late post-weaning")) %>% mutate(phase=factor(phase,levels = c("pre-weaning","early post-weaning","late post-weaning"))) %>% left_join(df_vOTUname2number,by=c("vOTU_Abundance"="vOTU")) %>% left_join(clusters_k3, by = c("vOTU_Nucl_Diversity"="vOTU"))%>% left_join(df_vOTUname2number,by=c("vOTU_Nucl_Diversity"="vOTU")) %>% mutate(vOTU_ID.y=factor(vOTU_ID.y,levels=paste("vOTU",mat_temp_nucl_heatmap[[2]]$tree_row$order,sep="")),vOTU_ID.x=factor(vOTU_ID.x,levels=paste("vOTU",mat_temp_nucl_heatmap[[2]]$tree_row$order,sep="")))%>% ggplot(aes(x=vOTU_ID.y,y=vOTU_ID.x,fill=kendall_cor))+geom_tile()+theme_classic(base_size = 27)+scale_fill_distiller(palette = "BrBG", limit = c(-1, 1))+labs(x="",y="",fill = expression(paste("",tau)))+facet_wrap(~phase,scales = "free_x")+theme(axis.text.x = element_text(angle = 90,vjust=0.5),legend.position = "right",legend.key.width = unit(0.3,"cm"))+guides(fill = guide_colorbar(title.vjust = 0.8,title.hjust = 0.1,barwidth = 1))
+plot_correlation_abund_nucl
+
+ggsave(plot_correlation_abund_nucl,filename = "assets/correlationAbundND.png",device = "png",width=420,height = 300,unit="mm")
+
+
+groups = list(c("pre-weaning","early post-weaning"),c("pre-weaning","late post-weaning"),c("early post-weaning","late post-weaning"))
+plot_early_vs_late = vOTU_abund_nuclDiv %>% left_join(clusters_k3, by = "vOTU") %>% mutate(phase=case_when(cluster_phase == 1 ~ "pre-weaning",cluster_phase == 2 ~ "early post-weaning",.default = "late post-weaning"))  %>% mutate(phase=factor(phase,levels = c("pre-weaning","early post-weaning","late post-weaning"))) %>% select(nucl.div_vOTU,phase) %>% ggplot(aes(x=phase,y=nucl.div_vOTU))+geom_boxplot(alpha=0.7)+geom_jitter(alpha=0.5)+stat_compare_means(comparisons = groups ,method = "wilcox.test",label = "p.signif",na.rm = T,hide.ns = T) +scale_y_log10()+theme_classic(base_size = 27)+theme(axis.text.x = element_text(angle = 90,vjust=0.5,hjust=1))+labs(x="",y="Log10 scaled Nucleotide Diversity")
+plot_early_vs_late
+
+
+
+
+#corrplot::corrplot(corM)
+
+#Abund_VC_bacFam_melted = Abund_VC_bacFam %>% pivot_longer(cols = starts_with("rel.abund"),names_to = "organism",values_to = "rel.abund") %>% group_by(VC_ID,organism) %>% mutate(scaled_rel_abund = scale(rel.abund)) %>% mutate(age_bins = cut(age, breaks = seq(0, 650, by = 50), right = FALSE)) %>% group_by(age_bins,family,VC_ID,organism) %>% mutate(mean_relabund=mean(rel.abund))
+
+metric_label=c("nucl.div_vOTU" = "Nucleotide Diversity","rel.abund_vOTU"="Relative Abundance")
+heatmap_maturation_nucl_abund = vOTU_abund_nuclDiv %>% left_join(clusters_k3, by = "vOTU") %>% mutate(phase=case_when(cluster_phase == 1 ~ "pre-weaning",cluster_phase == 2 ~ "early post-weaning",.default = "late post-weaning")) %>% left_join(df_vOTUname2number,by="vOTU") %>% pivot_longer(cols = contains("_vOTU"), names_to = "metric", values_to = "value") %>% mutate(age_bins = cut(age, breaks = seq(0, 650, by = 50), right = FALSE)) %>%  group_by(age_bins,vOTU_ID,phase,metric) %>% summarise(mean_value_metric = mean(value, na.rm = TRUE), .groups = "drop") %>%  group_by(vOTU_ID, metric) %>% mutate(scaled_value = as.numeric(scale(mean_value_metric))) %>% ungroup() %>% mutate(vOTU_ID=factor(vOTU_ID,levels=paste("vOTU",mat_temp_nucl_heatmap[[2]]$tree_row$order,sep=""))) %>% filter(!vOTU_ID %in% c("vOTU14","vOTU17")) %>% ggplot(aes(x = age_bins, y = vOTU_ID, fill = scaled_value)) + facet_wrap(~metric,labeller = labeller(metric = metric_label))+  geom_tile() + scale_fill_viridis_c(option = "plasma", name = "") + theme_classic(base_size = 30) +  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),axis.title.x = element_text(margin = ggplot2::margin(t = 30)))+labs(x="Infant chronological age bins (days)",y="")
+heatmap_maturation_nucl_abund
+
+#axis.title.x = element_text(margin = margin(t = 20))
+top_6vOTUs=df_importance_nucl %>% arrange(-mean_importance) %>% pull(species) %>% head(6)
+
+test_important_filtered =  test_all_filtered %>% select(all_of(top_6vOTUs),"sample","trajectory") %>% pivot_longer(cols=all_of(top_6vOTUs),names_to = "vOTU",values_to = "nucl_div") #%>% group_by(vOTU,trajectory) %>% summarise(vOTU = vOTU, trajectory=trajectory,mean_nucl_div = mean(nucl_div))
+
+test_important_filtered$trajectory = factor(test_important_filtered$trajectory ,levels=levels(all_children$trajectory))
+
+dodge_width <- 0.8
+
+important_vOTU_plot = test_important_filtered %>% filter(nucl_div !=0) %>% left_join(df_vOTUname2number,by="vOTU") %>% ggplot(aes(x=vOTU_ID,y=nucl_div,color=trajectory))+geom_boxplot(position = position_dodge(width = dodge_width), outlier.shape = NA)+geom_point(position = position_jitterdodge(dodge.width = dodge_width, jitter.width = 0.2),alpha=0.5)+theme_classic(base_size = 27)+theme(axis.text.x  = element_text(angle = 45,hjust = 1, vjust = 1),legend.position = "top",legend.direction = "vertical")+ylab("Log10 Nucleotide Diversity")+xlab("")+scale_color_manual(values=colorblind_palette)+labs(color="Growth Trajectories")+scale_y_log10()
+important_vOTU_plot
+
+stat_results <- test_important_filtered %>% group_by(trajectory,vOTU) %>% mutate(sum_acrossHealth= sum(nucl_div)) %>% filter(sum_acrossHealth !=0) %>%
+  group_by(vOTU) %>%
+  wilcox_test(nucl_div ~ trajectory, 
+              ref.group = "Consistent normal growth",
+              p.adjust.method = "fdr") %>% # Essential for multiple testing correction
+  add_significance()
+print(stat_results)
+
+nucl_maturation_ab = plot_grid(plot_nucl_variation,plot_maturation_temperate,labels = c("A","B"),ncol = 2,rel_widths = c(0.5,0.5),axis = "lrtb",label_size = 24)
+
+nucl_maturation_cd = plot_grid(heatmap_maturation_nucl_abund,plot_early_vs_late,labels = c("C","D"),ncol = 2,rel_widths = c(0.7,0.3),align = "hv",axis = "lrtb",label_size = 24)
+
+nucl_maturation_ef = plot_grid(mat_temp_nucl_train_test[[7]]+theme_classic(base_size = 27)+theme(plot.margin = ggplot2::margin(t = 10, r = 10, b = 10, l = 30),axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1),legend.position = "none"),important_vOTU_plot,labels = c("E","F"),ncol = 2,rel_widths = c(0.5,0.5),align = "v",axis = "lrtb",label_size = 24)
+
+nucl_maturation = plot_grid(nucl_maturation_ab,nucl_maturation_cd,nucl_maturation_ef,ncol = 1,rel_heights = c(0.3,0.4,0.3),align = "h",axis = "lrtb",label_size = 24)
+
+ggsave(nucl_maturation,filename = "assets/nucl_maturation.png",device = "png",width=520,height = 750,unit="mm")
+
+ggsave(mat_temp_nucl_heatmap[[1]],filename = "assets/importance_nucl.png",device = "png",width=250,height = 300,unit="mm")
+```
+
+#### what if I used both metrics ?
+
+```{r}
+
+#WHAT IF I USED BOTH
+
+dataset_abund = list_datasets_temperate$train_healthy %>% select(sample,df_importance_VC$species) %>% filter(rowSums(select(.,df_importance_VC$species))!=0)
+
+dataset_microdiv = list_datasets_microdiv$train_healthy %>% select(sample,df_importance_nucl$species) %>% filter(rowSums(select(.,df_importance_nucl$species))!=0)
+
+common_samples = intersect(dataset_abund$sample,dataset_microdiv$sample)
+
+dataset_abund = dataset_abund %>% filter(sample %in% common_samples) %>% select(df_importance_VC$species)
+dataset_microdiv = dataset_microdiv %>% filter(sample %in% common_samples) %>% select(df_importance_nucl$species)
+
+dist_abund = vegdist(dataset_abund,method = "bray")
+dist_microdiv = vegdist(dataset_microdiv,method = "bray")
+
+mantel_result <- mantel(dist_microdiv,dist_abund, method = "spearman", permutations = 999)
+print(mantel_result)
+
+df_mantel <- data.frame(Abundance_Dist = dist_abund, 
+                        Microdiv_Dist = dist_microdiv)
+
+mantel_micro_macro = ggplot(df_mantel, aes(x = Abundance_Dist, y = Microdiv_Dist)) +
+  geom_point(alpha = 0.1, color = "steelblue") + # Use low alpha because there are many pairs
+  geom_smooth(method = "lm", color = "darkred") +
+  labs(title = "Mantel Test Visualization",
+       subtitle = paste("Mantel r = 0.428, p =", mantel_result$signif),
+       x = "Phage Abundance Distance (Bray-Curtis)",
+       y = "Microdiversity Distance (Bray-Curtis)") +
+  theme_classic(base_size = 27)
+ggsave(mantel_micro_macro,filename = "assets/mantel_micro_macro.png",device = "png",width=250,height = 250,unit="mm")
+
+
+vOTU_nucl_abund_df = full_join(vOTU_nucl_div_df, viral_cluster_df, by = c("sample","age","subjectID.x","trajectory"))
+
+vOTU_nucl_abund_df[is.na(vOTU_nucl_abund_df)]=0
+
+predictors_both=union(predictors_VC,predictors_nucl)
+
+list_datasets_both <- selectDatasets(vOTU_nucl_abund_df,sampled_infants,predictors_both)
+
+df_importance_both = feature_selection(list_datasets_both$train_healthy,predictors_both)
+
+#### Healthy maturation model #### 
+mat_temp_both_heatmap=plots_maturation(df_importance_both,list_datasets_both$train_healthy)
+
+#Remove samples were important VCs were always 0 in train and test sets. 
+train_filtered = list_datasets_both$train_healthy
+to_keep=train_filtered %>% select(df_importance_both$species) %>% rowSums()!=0
+train_filtered=train_filtered[to_keep,]
+
+test_all_filtered = list_datasets_both$test_all
+to_keep=test_all_filtered %>% select(df_importance_both$species) %>% rowSums()!=0
+test_all_filtered=test_all_filtered[to_keep,]
+
+mat_temp_nucl_train_test = normal_growth_maturation(train_df = train_filtered,
+                                                   predictors = df_importance_both$species,
+                                                   test_df_allTrajectories = test_all_filtered,
+                                                   organism = "Temperate Phages Nucl")
+
+```
+
+#### Controls - viral microdiversity
+
+```{r}
+#Coverage evaluation 
+vOTU_nucl_div_to_VC_PHF = vOTU_nucl_div %>% left_join(viral_cluster_VC_to_PHF,by = c("scaffold"="genome")) %>% left_join(all_children[,-c(5,10:15,16,20:23)],by = c("sample" = "accession")) %>% drop_na(subjectID.x) %>% select(sample,scaffold,coverage,breadth,nucl_diversity,best_taxonomy_new,VC_ID,family,laz,subjectID.x,age,MAL_group,trajectory,sex) %>% distinct()
+
+lifecycle_df= vPOP_coverage_lifeStyle[,c("contig","replication_cycle")] %>% unique()
+
+vOTU_nucl_div_to_VC_PHF_RC = vOTU_nucl_div_to_VC_PHF %>% left_join(lifecycle_df,by=c("scaffold"="contig"))
+
+vOTU_nucl_div_to_VC_PHF_RC_temperate = vOTU_nucl_div_to_VC_PHF_RC %>% filter(replication_cycle %in% c("Temperate"),trajectory=="Consistent normal growth")
+
+vOTU_nucl_div_to_VC_PHF_RC_temperate$subjectID.x=factor(vOTU_nucl_div_to_VC_PHF_RC_temperate$subjectID.x)
+vOTU_nucl_div_to_VC_PHF_RC_temperate$scaffold=factor(vOTU_nucl_div_to_VC_PHF_RC_temperate$scaffold)
+
+gam_nucl_div <- gam(nucl_diversity ~ age + s(scaffold, bs = "re")  + s(subjectID.x, bs = "re"), data = vOTU_nucl_div_to_VC_PHF_RC_temperate)
+summary(gam_nucl_div)
+AIC(gam_nucl_div)
+
+age_range <- seq(min(data_gam_bacteria$age), max(data_gam_bacteria$age)-50, length.out = 10)
+ref_grid_nucl <- ref_grid(gam_nucl_div, at = list(age = age_range))
+emm_nucl <- emmeans(ref_grid_nucl, ~ age)
+emm_nucl = data.frame(emm_nucl)
+#Add legend R2 and deviance explained
+nucl_healthy=ggplot(emm_nucl, aes(x = age, y = emmean)) + geom_line(size=1,color=colorblind_palette[1])+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL),alpha=0.2,fill=colorblind_palette[1]) +  labs(x = "Infant chronological age (days)",y = "GAM - EMMs (Z-Score)")+ theme_classic(base_size = 30)+theme(strip.text = element_text(face="bold"),plot.margin = ggplot2::margin(t = 5, r = 20, b = 5, l = 10))+ scale_y_continuous(n.breaks = 8)
+nucl_healthy
+ggsave(nucl_healthy,filename = "assets/nucl_overtime_gam.png",device = "png",width=500,height = 500,unit="mm")
+
+
+vOTU_nucl_div_to_VC_PHF_RC_temperate_imp = vOTU_nucl_div_to_VC_PHF_RC %>% filter(replication_cycle %in% c("Temperate"), VC_ID %in% df_importance_VC$species)
+
+vOTU_nucl_div_to_VC_PHF_RC_temperate_imp$family = factor(vOTU_nucl_div_to_VC_PHF_RC_temperate_imp$family,levels=c("Bacteroidaceae","Lachnospiraceae","Ruminococcaceae","Erysipelotrichaceae","Coriobacteriaceae","Bifidobacteriaceae","Selenomonadaceae")) 
+
+plot_nucl_variation = vOTU_nucl_div_to_VC_PHF_RC_temperate_imp  %>% ggplot(aes(x=reorder(scaffold,as.numeric(factor(family))),y=(nucl_diversity),color=family))+geom_boxplot()+geom_point(alpha=0.5)+theme_classic()+theme(axis.text.x  = element_blank())+ylab("Log10 scaled Nucleotide Diversity")+xlab("vOTUs")+scale_y_log10()+scale_color_manual(values=cbPalette_hosts)+labs(color="PHF")
+plot_nucl_variation
+#nucl_div against SNV count 
+#ggplot(vOTU_nucl_div_to_VC_PHF,aes(y=nucl_diversity,x=divergent_site_count,color=stunted_status))+geom_point()+geom_smooth(method="lm")+theme_bw()
+
+
+#nucl_div against coverage
+nucl_coverage = ggplot(vOTU_nucl_div_to_VC_PHF,aes(y=nucl_diversity,x=log10(coverage),color=trajectory))+geom_point()+geom_smooth(method="lm")+theme_classic(base_size = 25)
+ggsave(nucl_coverage,filename = "assets/nucl_coverage.png",device = "png",width=500,height = 500,unit="mm")
+
+#vOTU_nucl_div_to_VC_PHF$log10_cov = log10(vOTU_nucl_div_to_VC_PHF$coverage)
+#pi_vs_cov <- lmer(nucl_diversity ~ log10_cov * trajectory + (1 | subjectID.x) + 
+ #                  (1 | scaffold), data = vOTU_nucl_div_to_VC_PHF)
+
+pi_vs_cov <- lmer(nucl_diversity ~ coverage * trajectory + (1 | subjectID.x) + 
+                   (1 | scaffold), data = vOTU_nucl_div_to_VC_PHF)
+
+
+#Both abundance and microdiversity 
+train_abund_nucl = viral_cluster_train %>% left_join(vOTU_nucl_div_Matrix_both,by=c("sample")) 
+train_abund_nucl[is.na(train_abund_nucl)] <- 0
+
+train_abund_nucl = train_abund_nucl %>% left_join(all_children[,-c(3,5,10:15,16,20:23)],by = c("sample" = "accession")) %>% drop_na(subjectID.x)
+
+train_abund_nucl =train_abund_nucl[,c(1:3182)]
+predictors=train_abund_nucl %>% select(-sample, -age) %>% names()
+df_importance_both = feature_selection(train_abund_nucl,predictors)
+
+all_test_abund_nucl = viral_cluster_ALLtest %>% left_join(vOTU_nucl_div_Matrix_both,by=c("sample")) 
+all_test_abund_nucl[is.na(all_test_abund_nucl)] <- 0
+
+to_keep=all_test_abund_nucl %>% select(df_importance_both$species) %>% rowSums()!=0
+all_test_abund_nucl_filt=all_test_abund_nucl[to_keep,]
+
+tempPhages_BOTH_maturation = normal_growth_maturation(train_df = train_abund_nucl,
+                                                   predictors = df_importance_both$species,
+                                                   test_df_allTrajectories=all_test_abund_nucl_filt,
+                                                    organism = "Temperate Phages_ nucl.div")
+
+newdata_all = rbind(mat_bacteria_train_test[[1]],mat_temperate_train_test[[1]])
+predictions_healthy_all = rbind(mat_bacteria_train_test[[2]],mat_temperate_train_test[[2]])
+
+plot_maturation_healthy = ggplot()+geom_line(data= newdata_all, aes(x = age, y = pred_age, linetype = organism),color = colorblind_palette[1], size = 1.2) +
+    labs(x = "Age", y = "Predicted Age") +
+    theme_classic(base_size = 14)+scale_color_manual(values=colorblind_palette,name="")+ geom_point(data=predictions_healthy_all,aes(x=age,y=pred_age,shape=organism),color = colorblind_palette[1])+ scale_x_continuous(expand = expansion(mult = 0.1))+scale_shape_manual(values = c(16,0,11))+geom_abline(slope = 1,intercept = 0)+annotate("text",x=12,y=500,label = r2_label(mat_bacteria_train_test[[2]],"Bacteria"),parse=T,size=5,hjust=0)+annotate("text",x=12,y=400,label = r2_label(mat_temperate_train_test[[2]],"Phages"),parse=T,size=5,hjust=0)+theme(legend.position = "top")+labs(shape="",linetype="")
+plot_maturation_healthy 
+
+```
+
+#### nucleotide diversity GAM per vOTU
+
+```{r}
+#Models for specific vOTUs
+#Test, biomarkers
+vOTU_truncated <- vOTU_nucl_div %>% filter(age <= 200) %>% mutate(stunted_status = droplevels(factor(stunted_status)), scaffold = factor(scaffold))
+
+library(broom) # For tidying model outputs
+library(furrr)
+
+#Only vOTUs with more than 20 observations
+scaffolds_to_test <- vOTU_truncated %>% group_by(scaffold,stunted_status) %>% tally() %>% filter(n>=10) %>% group_by(scaffold) %>% tally() %>% filter(n>=2) %>% pull(scaffold)
+  
+#GAM on a single scaffold
+run_scaffold_gam <- function(scaffold_id,data) {
+  df_sub <- filter(data, scaffold == scaffold_id)
+  df_sub = df_sub %>% filter(stunted_status %in% names(which(table(df_sub$stunted_status)>=5)))
+  df_sub = droplevels(df_sub)
+  tryCatch({
+    # Fit GAM for the specific scaffold
+    m <- gam(nucl_diversity ~ stunted_status + s(age, by = stunted_status, k = 5) + log10_cov,
+             family = tw(), data = df_sub, method = "REML")
+    
+    # Extract smooth terms (the age dynamics)
+    res <- tidy(m, parametric = FALSE) %>% mutate(scaffold = scaffold_id)
+    
+    return(res)
+  }, error = function(e) return(NULL))
+}
+
+vOTU_truncated_new = vOTU_truncated %>%
+    mutate(age_bin = cut(age, breaks = 2)) %>% # Divide age into 4 windows
+    group_by(scaffold, stunted_status, age_bin) %>%
+    summarize(n_bin = n(), .groups = "drop") %>% group_by(scaffold,stunted_status) %>% mutate(min_points= min(n_bin)) %>% filter(min(min_points)>=2)
+
+results_all <- future_map_dfr(scaffolds_to_test,~run_scaffold_gam(.x,vOTU_truncated_new),.progress = TRUE)
+
+results_final <- results_all %>% group_by(term) %>% mutate(p.adj = p.adjust(p.value, method = "fdr")) %>% arrange(p.adj)
+
+top_sensitive_ids <- results_final %>% filter(p.adj <= 0.05) %>%
+  pull(scaffold) %>% unique()
+
+# Loop through the top 5 and create plots
+plot_list <- lapply(top_sensitive_ids, function(sid) {
+  # We need the specific model for that scaffold
+  # Assuming you have a list of models or can re-run the top ones
+  df_sub <- vOTU_truncated[vOTU_truncated$scaffold == sid, ]
+  df_sub = df_sub %>% filter(stunted_status %in% names(which(table(df_sub$stunted_status)>=5)))
+  df_sub = droplevels(df_sub)
+  m_sub <- gam(nucl_diversity ~ stunted_status + s(age, by = stunted_status, k = 4) + log10_cov,
+               family = tw(), data = df_sub)
+  
+  preds <- predict_response(m_sub, terms = c("age [all]", "stunted_status"))
+  
+  plot(preds, show_data = TRUE, dot_alpha = 1, dot_size = 1.5)+
+    labs(title = paste("Scaffold:", sid),
+         subtitle = "Diversity dynamics by nutritional status",
+         y = "Nucleotide Diversity",
+         x = "Age (Days)") +
+    theme_minimal()
+})
+
+# Display the selected plot
+plot_list[[2]]
+
+
+replication_cycle_df=  vPOP_coverage_lifeStyle %>% select(contig,replication_cycle) %>% distinct() 
+
+vOTU_nucl_div_to_VC_PHF_RC %>% filter(replication_cycle %in% c("Temperate"), VC_ID %in% df_importance_VC$species) %>% ggplot(aes(x=reorder(scaffold,as.numeric(factor(family))),y=log10(nucl_diversity),color=family))+geom_boxplot()+geom_point(alpha=0.5)+theme_classic()+theme(axis.text.x  = element_blank())+ylab("Log10 scaled Nucleotide Diversity")+xlab("vOTUs")
+
+vOTU_RC_nucl_assigned = vOTU_nucl_div_to_VC_PHF_RC[vOTU_nucl_div_to_VC_PHF_RC$replication_cycle=="Unassigned Life Style",]
+
+vOTU_RC_nucl_assigned = droplevels(vOTU_RC_nucl_assigned)
+pi_vs_age <- lmer(nucl_diversity ~ age*replication_cycle + (1 | subjectID.x) +  (1 | scaffold), data = vOTU_RC_nucl_assigned)
+
+pi_vs_age_temp <- lmer(nucl_diversity ~ age*trajectory + (1 | subjectID.x) + (1 | scaffold), data =vOTU_nucl_div_to_VC_PHF_RC[vOTU_nucl_div_to_VC_PHF_RC$replication_cycle=="Temperate",])
+
+summary(pi_vs_age)
+```
+
+### PHF
+
+```{r}
+
+temperate_contigs=vPOP_coverage_lifeStyle %>% select(contig,replication_cycle) %>% distinct() %>% filter(replication_cycle=="Temperate") %>% pull(contig)
+
+train = list_datasets_temperate[[1]]
+
+host_pred_split_temperate = host_pred_split[host_pred_split$Virus %in% temperate_contigs,]
+
+PHF_list= split(host_pred_split_temperate$Virus, host_pred_split_temperate$family)
+
+viral_PHF_train <- as.data.frame(lapply(PHF_list, function(cols) {
+  rowSums(train[, cols, drop = FALSE])
+}))
+
+viral_PHF_train <- cbind(train[, c("sample", "age")], viral_PHF_train)
+
+
+viral_cluster_to_PHF = viral_family_cluster %>% left_join(host_pred_split, by = c("genome"="Virus"))
+viral_cluster_to_PHF$best_taxonomy_new = gsub("[:|]", ".", viral_cluster_to_PHF$best_taxonomy_corrected)
+viral_cluster_VC_to_PHF = viral_cluster_to_PHF %>% mutate(VC_ID = paste0("VC", match(best_taxonomy_new, unique(best_taxonomy_new)))) %>% distinct()
+
+viral_cluster_to_VC = viral_cluster_VC_to_PHF[,c(13,14)] %>% distinct()
+change_names_df=data.frame(Tax=names(viral_cluster_train))
+change_names_df = change_names_df %>% left_join(viral_cluster_to_VC,by=c("Tax"="best_taxonomy_new"))
+
+names(viral_cluster_train)[-c(1,2)] = change_names_df$VC_ID[-c(1,2)]
+predictors=names(viral_cluster_train)[-c(1,2)]
+df_importance_VC = feature_selection(viral_cluster_train,predictors)
+
+```
+
+### Plots
+
+```{r}
+#Plots
+plot_maturation_healthy = ggplot()+geom_line(data= newdata, aes(x = age, y = pred_age, linetype = organism),color = colorblind_palette[1], size = 1.2) +
+    labs(x = "Infant Chronological Age", y = "Microbiome Age") +
+    theme_classic(base_size = 14)+scale_color_manual(values=colorblind_palette,name="")+ geom_point(data=predictions_healthy,aes(x=age,y=pred_age,shape=organism),color = colorblind_palette[1])+ scale_x_continuous(expand = expansion(mult = 0.1))+scale_shape_manual(values = c(16,0))+geom_abline(slope = 1,intercept = 0)+annotate("text",x=12,y=620,label = r2_label(mat_bacteria_train_test[[2]],"Bacteria"),parse=T,size=7,hjust=0)+annotate("text",x=12,y=550,label = r2_label(mat_temperate_train_test[[2]],"Phages"),parse=T,size=7,hjust=0)+theme(legend.position = "top")+labs(shape="",linetype="")
+plot_maturation_healthy 
+
+VC_mat_comparison_ab = plot_grid(plot_maturation_healthy,mat_temperate_train_test[[6]],ncol = 2, labels = c("A","B"),rel_widths = c(0.5, 0.5),rel_heights = c(0.3,0.7),align = "h",axis = "lrtb")
+
+VC_mat_comparison_cd = plot_grid(ggdraw(mat_bact_heatmap[[2]]$gtable)+theme_classic(base_size = 15),ggdraw(mat_temperate_heatmap[[2]]$gtable)+theme_classic(base_size = 15),ncol = 2, labels = c("C","D"),rel_widths = c(0.6, 0.4),align = "h",axis = "lrtb")
+VC_mat_comparison_cd
+
+VC_mat_comparison_efg = plot_grid(plot_vc_phf,plot_correlation,mat_temperate_train_test[[7]],ncol = 3, labels = c("E","F","G"),rel_widths = c(0.3,0.3,0.4),align = "h",axis = "lrtb")
+
+
+VC_mat_comparison = plot_grid(VC_mat_comparison_ab,VC_mat_comparison_cd,VC_mat_comparison_efg,ncol = 1,rel_heights = c(0.2,0.6,0.2),align = "h",axis = "lrtb")
+ggsave(VC_mat_comparison,filename = "assets/NormalGrowth_maturation.png",device = "png",width=600,height = 800,unit="mm")
+
+ggsave(VC_mat_comparison,filename = "assets/NormalGrowth_microdiv.png",device = "png",width=600,height = 800,unit="mm")
+
+
+
+microdiversity_plots_ab = plot_grid(plot_nucl_variation,mat_temp_nucl_train_test[[6]],ncol = 2,labels = c("A","B"),rel_widths = c(0.5,0.5),align = "h",axis = "lrtb")
+
+microdiversity_plots_cd = plot_grid(mat_temperate_train_test[[7]],mat_temp_nucl_train_test[[7]],ncol = 2,labels = c("C","D"),rel_widths = c(0.5,0.5),align = "h",axis = "lrtb")
+
+microdiversity_plots = plot_grid(microdiversity_plots_ab,microdiversity_plots_cd,important_vOTU_plot,ncol = 1,rel_heights = c(0.2,0.6,0.2),align = "h",axis = "lrtb")
+ggsave(microdiversity_plots,filename = "assets/microdiv_plots.png",device = "png",width=300,height = 500,unit="mm")
+
+
+
+ggsave(tempPhages_healthy_maturation[[3]],filename = "assets/temperate_healthy_maturation.png",device = "png",width=200,height = 200,unit="mm")
+
+ggsave(tempPhages_healthy_maturation[[6]],filename = "assets/temperate_healthy_weaningCat.png",device = "png",width=200,height = 200,unit="mm")
+
+ggsave(,filename = "assets/temperate_healthy_weaningCat.png",device = "png",width=200,height = 200,unit="mm")
+
+plot_maturity_gap = plot_grid(bacteria_healthy_maturation[[7]], tempPhages_healthy_maturation[[7]], labels = c("Bacteria","Temperate Phages"))
+ggsave(plot_maturity_gap,filename = "assets/maturity_gap.png",device = "png",width=300,height = 300,unit="mm")
+
+
+comparison = rbind(bacteria_healthy_maturation[[4]] , tempPhages_healthy_maturation[[4]])
+plot_squarederror_compared= comparison %>% ggplot(aes(x=trajectory,y=squared_error,color=organism))+geom_point(alpha=0.8,position = position_jitterdodge())+geom_boxplot()+stat_compare_means(method = "wilcox.test", label = "p.signif",label.y = 400,size=7)+labs(color="")+labs(title="Comparing Shannon Diversity During Normal Growth across Communities")+xlab("")+ylab("Sample Prediction Error (Days)")+theme_classic(base_size = 15)+theme(axis.text.x = element_text(angle=90))+scale_color_manual(values=organism_palette,name="")
+
+plot_squarederror_compared
+df_importance_bact_original = df_importance_bact
+healthy_matrix_train_original =  healthy_matrix_train
+
+df_importance_bact$species = gsub("s__","",df_importance_bact$species)
+df_importance_bact$species = gsub("^([A-Z])[a-z]+_", "\\1_", df_importance_bact$species)
+names(healthy_matrix_train)=gsub("s__","",names(healthy_matrix_train))
+names(healthy_matrix_train) = gsub("^([A-Z])[a-z]+_", "\\1_", names(healthy_matrix_train))
+  
+p_bact_imp = plots_maturation(df_importance_bact,healthy_matrix_train)
+p_bact_abundance_gtable = p_bact_imp[[2]]$gtable
+p_bact_abundance_gtable$grobs[p_bact_abundance_gtable$layout$name == "legend"]=NULL
+p_bact_abundance_gtable$layout = p_bact_abundance_gtable$layout[p_bact_abundance_gtable$layout$name != "legend",]
+p_bact_abundance_gtable$widths[5] <- unit(0, "bigpts")
+
+plot_abundance_bacteria = plot_grid(p_bact_imp[[1]], p_bact_abundance_gtable,ncol = 2, labels = c("A", "B"))
+ggsave(plot_abundance_bacteria,filename = "assets/bacteria_maturation.png",device = "png",width=300,height = 300,unit="mm") 
+
+p_tempPhages_imp = plots_maturation(df_importance_VC,viral_cluster_train)
+p_tempPhages_abundance_gtable = p_tempPhages_imp[[2]]$gtable
+
+plot_abundance_tempPhages = plot_grid(p_tempPhages_imp[[1]], p_tempPhages_abundance_gtable,ncol = 2, labels = c("A", "B"))
+ggsave(plot_abundance_tempPhages,filename = "assets/temperate_maturation.png",device = "png",width=300,height = 300,unit="mm")
+
+
+
+#Correlation bacterial host, phage abundance. 
+
+
+#NOT ANYMORE 
+
+#setEPS()
+#postscript("Zimbabwe_bacteria/healthy_test_bacteria.eps", width = 7, height = 7, paper = "special", horizontal = FALSE)
+
+
+#Compare error
+data_comp_pred_data <- data.frame(age = predictions$age)
+
+data_comp_pred_data$subjectID.x <- factor(predictions_healthy$subjectID.x[1],
+                                          levels = levels(predictions_healthy$subjectID.x))
+
+# Predict fitted values
+data_comp_pred_data$predicted_healthy <- predict(gam_model, data_comp_pred_data,type = "response")
+
+data_comp_pred_data$stunted_status = predictions$stunted_status
+data_comp_pred_data$predicted_age_rf= predictions$pred_age
+
+
+data_comp_pred_data$error= data_comp_pred_data$predicted_age_rf - data_comp_pred_data$predicted_healthy
+
+ggplot(data_comp_pred_data, aes(y = error, x = stunted_status, color = stunted_status)) +
+  geom_violin(alpha = 0.5) +geom_jitter(width = 0.1, size = 0.8, alpha = 0.4) +theme_bw() + scale_color_manual(values = colorblind_palette, name = "Nutritional Status") + ylab("Predicted age if healthy - Real age") +xlab("") + geom_hline(yintercept = 0, linetype = "dashed") +  annotate("rect", ymin = -Inf, ymax = 0, xmin = -Inf, xmax = Inf, 
+           fill = colorblind_palette[2], alpha = 0.1) + geom_text(aes(x = 1.5, y = -380, label = "Immature"),color = "black", size = 4) +
+  stat_compare_means(method = "wilcox.test", ref.group = "Healthy",label = "p.signif", hide.ns = FALSE) + theme(axis.text.x = element_text(angle = 45, hjust = 1),                                            strip.background = element_rect(fill = "white"),
+        strip.text = element_text(face = "bold"),
+        legend.position = "bottom")
+
+#data_comp_pred_data_bins <- data_comp_pred_data %>%   mutate(age_bin = cut(age, 
+                 #      breaks = c(0, 150, 400, 600), 
+                  #     labels = c("0-150 days", "151-400 days", "401-600 days"),
+                   #    include.lowest = TRUE))
+
+```
+
+### Experiment independent samples.
+
+```{r}
+
+independent_df_normal = profile_metadata %>% filter(trajectory == "Consistent normal growth") %>% group_by(subjectID.x) %>% slice_sample(n = 1) %>% ungroup()
+
+independent_df_stunted = profile_metadata %>% filter(trajectory != "Consistent normal growth") %>% group_by(subjectID.x) %>% slice_sample(n = 1) %>% ungroup()
+
+hist(independent_df_normal$age)
+hist(independent_df_stunted$age)
+
+train_index = createDataPartition(independent_df_normal$age, p=0.7,list=F)
+train = independent_df_normal[train_index,] %>% select(c(starts_with("s__"),"sample","age"))
+test = independent_df_normal[-train_index,] 
+
+independent_df_stunted_test_normal = rbind(independent_df_stunted,test)
+
+predictors = colnames(train)[grep("s__",colnames(train))]
+
+independent_important = feature_selection(train,predictors)
+mat_bacteria_independent = normal_growth_maturation(train,independent_important$species,independent_df_stunted_test_normal,"Bacteria")
+```
